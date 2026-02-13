@@ -23,7 +23,10 @@ class RetrievedChunk:
 
 
 QUERY_TOKEN_RE = re.compile(r"[a-z0-9]+")
-SECTION_PRIORITY_RE = re.compile(r"(method|approach|architecture|supervision|loss|training)", re.IGNORECASE)
+SECTION_PRIORITY_RE = re.compile(
+    r"(method|approach|supervision|loss|training|optimal matching)",
+    re.IGNORECASE,
+)
 COMMON_QUERY_TERMS = {
     "about",
     "against",
@@ -87,7 +90,7 @@ class HybridRetriever:
         keyword_k: int = 12,
         require_relevance: bool = False,
         vector_score_threshold: float = 0.45,
-        max_chunks_per_doc: int = 4,
+        max_per_doc: int = 4,
         section_boost: float = 0.0,
     ) -> list[RetrievedChunk]:
         query_vector = self.embedder.embed_texts([query])[0]
@@ -106,7 +109,7 @@ class HybridRetriever:
 
         ranked = sorted(by_id.values(), key=lambda item: item.fused_score, reverse=True)
         deduped = self._dedupe_ranked_chunks(ranked)
-        quota_limited = self._apply_doc_quota(deduped, max_chunks_per_doc=max_chunks_per_doc)
+        quota_limited = self._apply_doc_quota(deduped, max_per_doc=max_per_doc)
         shortlist = quota_limited[: max(top_k, 3)]
 
         if require_relevance and self._is_irrelevant_result(query, shortlist, vector_score_threshold):
@@ -164,14 +167,14 @@ class HybridRetriever:
         return deduped
 
     @staticmethod
-    def _apply_doc_quota(chunks: list[RetrievedChunk], max_chunks_per_doc: int) -> list[RetrievedChunk]:
-        if max_chunks_per_doc <= 0:
+    def _apply_doc_quota(chunks: list[RetrievedChunk], max_per_doc: int) -> list[RetrievedChunk]:
+        if max_per_doc <= 0:
             return chunks
         out: list[RetrievedChunk] = []
         per_doc_counts: dict[str, int] = {}
         for chunk in chunks:
             count = per_doc_counts.get(chunk.arxiv_id, 0)
-            if count >= max_chunks_per_doc:
+            if count >= max_per_doc:
                 continue
             per_doc_counts[chunk.arxiv_id] = count + 1
             out.append(chunk)
@@ -266,7 +269,7 @@ def build_strict_answer_prompt(question: str, chunks: list[RetrievedChunk]) -> s
 
     lines.append("Rules:")
     lines.append("1. Only use information supported by the sources.")
-    lines.append("2. Every non-trivial claim must include citations like [S3][S7].")
+    lines.append("2. Every non-trivial claim must include inline citations like [S3][S7].")
     lines.append("3. If sources are insufficient, state what is missing and ask one clarifying question.")
     lines.append("4. Prefer comparisons and what each paper claims or shows.")
     lines.append("5. Do not fabricate details, metrics, or citations.")

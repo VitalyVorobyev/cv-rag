@@ -7,7 +7,7 @@ from typer.testing import CliRunner
 
 import cv_rag.cli as cli_module
 from cv_rag.config import Settings
-from cv_rag.retrieve import NoRelevantSourcesError, RetrievedChunk, build_strict_answer_prompt
+from cv_rag.retrieve import RetrievedChunk, build_strict_answer_prompt
 
 
 def test_build_strict_answer_prompt_includes_sources_and_rules() -> None:
@@ -35,7 +35,7 @@ def test_build_strict_answer_prompt_includes_sources_and_rules() -> None:
     assert "[S1]" in prompt
     assert "[S2]" in prompt
     assert "Only use information supported by the sources." in prompt
-    assert "Every non-trivial claim must include citations like [S3][S7]." in prompt
+    assert "Every non-trivial claim must include inline citations like [S3][S7]." in prompt
 
 
 def test_answer_command_errors_when_no_sources_retrieved(
@@ -65,7 +65,7 @@ def test_answer_command_errors_when_no_sources_retrieved(
         keyword_k: int = 12,
         require_relevance: bool = False,
         vector_score_threshold: float = 0.45,
-        max_chunks_per_doc: int = 4,
+        max_per_doc: int = 4,
         section_boost: float = 0.0,
     ) -> list[RetrievedChunk]:
         return []
@@ -87,7 +87,7 @@ def test_answer_command_errors_when_no_sources_retrieved(
     )
 
     assert result.exit_code == 1
-    assert "No sources retrieved for this question" in result.output
+    assert "Not found in indexed corpus. Try: cv-rag ingest-ids 2104.00680 1911.11763" in result.output
 
 
 def test_answer_command_refuses_when_no_relevant_sources(
@@ -117,10 +117,10 @@ def test_answer_command_refuses_when_no_relevant_sources(
         keyword_k: int = 12,
         require_relevance: bool = False,
         vector_score_threshold: float = 0.45,
-        max_chunks_per_doc: int = 4,
+        max_per_doc: int = 4,
         section_boost: float = 0.0,
     ) -> list[RetrievedChunk]:
-        candidates = [
+        return [
             RetrievedChunk(
                 chunk_id="2602.00001:0",
                 arxiv_id="2602.00001",
@@ -140,7 +140,6 @@ def test_answer_command_refuses_when_no_relevant_sources(
                 vector_score=0.1,
             ),
         ]
-        raise NoRelevantSourcesError(candidates)
 
     monkeypatch.setattr(cli_module, "get_settings", lambda: settings)
     monkeypatch.setattr(cli_module, "QdrantStore", DummyQdrantStore)
@@ -189,7 +188,7 @@ def test_answer_refuses_comparison_when_top_doc_coverage_insufficient(
         keyword_k: int = 12,
         require_relevance: bool = False,
         vector_score_threshold: float = 0.45,
-        max_chunks_per_doc: int = 4,
+        max_per_doc: int = 4,
         section_boost: float = 0.0,
     ) -> list[RetrievedChunk]:
         return [
@@ -273,7 +272,7 @@ def test_answer_reprompts_when_citations_missing(monkeypatch: object, tmp_path: 
         keyword_k: int = 12,
         require_relevance: bool = False,
         vector_score_threshold: float = 0.45,
-        max_chunks_per_doc: int = 4,
+        max_per_doc: int = 4,
         section_boost: float = 0.0,
     ) -> list[RetrievedChunk]:
         return [
@@ -323,7 +322,12 @@ def test_answer_reprompts_when_citations_missing(monkeypatch: object, tmp_path: 
         calls.append(cmd)
         if len(calls) == 1:
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="Draft answer no citations", stderr="")
-        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="Revised answer [S1][S3]", stderr="")
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=0,
+            stdout="Revised answer [S1][S2][S3][S4][S5][S6]",
+            stderr="",
+        )
 
     monkeypatch.setattr(cli_module, "get_settings", lambda: settings)
     monkeypatch.setattr(cli_module, "QdrantStore", DummyQdrantStore)
@@ -343,7 +347,7 @@ def test_answer_reprompts_when_citations_missing(monkeypatch: object, tmp_path: 
     )
 
     assert result.exit_code == 0
-    assert "Revised answer [S1][S3]" in result.output
+    assert "Revised answer [S1][S2][S3][S4][S5][S6]" in result.output
     assert len(calls) == 2
     prompt_index = calls[1].index("--prompt") + 1
-    assert "You forgot citations; revise" in calls[1][prompt_index]
+    assert "You forgot citations. Rewrite with citations on every claim." in calls[1][prompt_index]

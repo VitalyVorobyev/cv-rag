@@ -24,7 +24,6 @@ from cv_rag.grobid_client import pdf_to_tei
 from cv_rag.qdrant_store import QdrantStore, VectorPoint
 from cv_rag.retrieve import (
     HybridRetriever,
-    NoRelevantSourcesError,
     RetrievedChunk,
     build_answer_prompt,
     build_strict_answer_prompt,
@@ -41,6 +40,10 @@ COMPARISON_QUERY_RE = re.compile(
     re.IGNORECASE,
 )
 CITATION_REF_RE = re.compile(r"\[S\d+\]")
+ANSWER_AUX_QUERIES = [
+    "LoFTR supervision loss objective coarse fine",
+    "SuperGlue loss negative log-likelihood dustbin Sinkhorn optimal transport",
+]
 
 
 def _load_tei_or_parse(pdf_path: Path, tei_path: Path, force: bool) -> str:
@@ -127,6 +130,77 @@ def _run_mlx_generate(
         console.print("[red]MLX generation returned an empty answer.[/red]")
         raise typer.Exit(code=1)
     return answer_text
+
+
+def _merge_and_cap_chunks(chunks: list[RetrievedChunk], max_per_doc: int) -> list[RetrievedChunk]:
+    by_key: dict[tuple[str, str, str], RetrievedChunk] = {}
+    for chunk in chunks:
+        key = (
+            chunk.arxiv_id,
+            chunk.section_title.strip().casefold(),
+            chunk.chunk_id,
+        )
+        existing = by_key.get(key)
+        if existing is None:
+            by_key[key] = RetrievedChunk(
+                chunk_id=chunk.chunk_id,
+                arxiv_id=chunk.arxiv_id,
+                title=chunk.title,
+                section_title=chunk.section_title,
+                text=chunk.text,
+                fused_score=chunk.fused_score,
+                vector_score=chunk.vector_score,
+                keyword_score=chunk.keyword_score,
+                sources=set(chunk.sources),
+            )
+            continue
+
+        existing.fused_score += chunk.fused_score
+        existing.sources.update(chunk.sources)
+        if chunk.vector_score is not None:
+            existing.vector_score = (
+                chunk.vector_score
+                if existing.vector_score is None
+                else max(existing.vector_score, chunk.vector_score)
+            )
+        if chunk.keyword_score is not None:
+            existing.keyword_score = (
+                chunk.keyword_score
+                if existing.keyword_score is None
+                else min(existing.keyword_score, chunk.keyword_score)
+            )
+
+    ranked = sorted(by_key.values(), key=lambda item: item.fused_score, reverse=True)
+    return HybridRetriever._apply_doc_quota(ranked, max_per_doc=max_per_doc)
+
+
+def _retrieve_for_answer(
+    retriever: HybridRetriever,
+    question: str,
+    k: int,
+    max_per_doc: int,
+    section_boost: float,
+) -> list[RetrievedChunk]:
+    queries = [question, *ANSWER_AUX_QUERIES]
+    per_query_top_k = max(k, 12)
+    per_query_branch_k = max(per_query_top_k * 2, 24)
+    merged_input: list[RetrievedChunk] = []
+
+    for retrieval_query in queries:
+        merged_input.extend(
+            retriever.retrieve(
+                query=retrieval_query,
+                top_k=per_query_top_k,
+                vector_k=per_query_branch_k,
+                keyword_k=per_query_branch_k,
+                require_relevance=False,
+                max_per_doc=0,
+                section_boost=section_boost,
+            )
+        )
+
+    merged = _merge_and_cap_chunks(merged_input, max_per_doc=max_per_doc)
+    return merged[:k]
 
 
 def _ingest_papers(
@@ -369,7 +443,7 @@ def query(
             top_k=top_k,
             vector_k=vector_k,
             keyword_k=keyword_k,
-            max_chunks_per_doc=max_per_doc,
+            max_per_doc=max_per_doc,
             section_boost=section_boost,
         )
     finally:
@@ -398,7 +472,7 @@ def query(
 @app.command()
 def answer(
     question: str = typer.Argument(..., help="Question to answer from local index."),
-    k: int = typer.Option(10, "--k", help="Number of sources to include."),
+    k: int = typer.Option(12, "--k", help="Number of sources to include after retrieval merge."),
     model: str = typer.Option(..., "--model", help="MLX model ID, local path, or HF repo."),
     max_tokens: int = typer.Option(600, "--max-tokens", help="Maximum tokens to generate."),
     temperature: float = typer.Option(0.2, "--temperature", help="Sampling temperature."),
@@ -410,9 +484,9 @@ def answer(
         help="Maximum number of chunks to keep per paper.",
     ),
     section_boost: float = typer.Option(
-        0.0,
+        0.05,
         "--section-boost",
-        help="Additive score boost for method/training-oriented section/title matches.",
+        help="Additive score boost for prioritized section/title matches; set 0 to disable.",
     ),
     show_sources: bool = typer.Option(
         False,
@@ -441,30 +515,29 @@ def answer(
     )
 
     try:
-        chunks = retriever.retrieve(
-            query=question,
-            top_k=k,
-            vector_k=max(k, 12),
-            keyword_k=max(k, 12),
-            require_relevance=True,
-            max_chunks_per_doc=max_per_doc,
+        chunks = _retrieve_for_answer(
+            retriever=retriever,
+            question=question,
+            k=k,
+            max_per_doc=max_per_doc,
             section_boost=section_boost,
         )
-    except NoRelevantSourcesError as exc:
+    finally:
+        sqlite_store.close()
+
+    if retriever._is_irrelevant_result(question, chunks[: max(3, len(chunks))], 0.45):
         console.print("Not found in indexed corpus. Try: cv-rag ingest-ids 2104.00680 1911.11763")
-        if exc.candidates:
+        if chunks:
             table = Table(title="Maybe Relevant (Top 3)")
             table.add_column("Rank", justify="right")
             table.add_column("Citation")
             table.add_column("Preview")
-            for idx, chunk in enumerate(exc.candidates[:3], start=1):
+            for idx, chunk in enumerate(chunks[:3], start=1):
                 citation = format_citation(chunk.arxiv_id, chunk.section_title)
                 preview = chunk.text[:160].replace("\n", " ")
                 table.add_row(str(idx), citation, preview)
             console.print(table)
         raise typer.Exit(code=1)
-    finally:
-        sqlite_store.close()
 
     if not chunks:
         console.print("[red]No sources retrieved for this question. Run ingest first or broaden the query.[/red]")
@@ -506,11 +579,10 @@ def answer(
         seed=seed,
     )
 
-    min_citation_count = min(2, len(chunks))
-    if len(CITATION_REF_RE.findall(answer_text)) < min_citation_count:
+    required_citations = max(6, (k + 1) // 2)
+    if len(CITATION_REF_RE.findall(answer_text)) < required_citations:
         revised_prompt = (
-            f"{prompt}\n\nYou forgot citations; revise.\n"
-            "Return a revised answer with inline citations like [S1][S3] for non-trivial claims."
+            f"{prompt}\n\nYou forgot citations. Rewrite with citations on every claim."
         )
         answer_text = _run_mlx_generate(
             model=model,

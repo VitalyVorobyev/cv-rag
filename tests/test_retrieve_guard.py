@@ -124,7 +124,7 @@ def test_section_boost_promotes_method_section() -> None:
             "chunk_id": "b:0",
             "arxiv_id": "1000.00002",
             "title": "Paper B",
-            "section_title": "Method",
+            "section_title": "Optimal Matching",
             "text": "Our approach details",
             "score": 0.90,
         },
@@ -183,7 +183,7 @@ def test_max_chunks_per_doc_quota_is_enforced() -> None:
         sqlite_store=DummySQLiteStore([]),
     )
 
-    chunks = retriever.retrieve(query="matching", top_k=8, vector_k=8, keyword_k=0, max_chunks_per_doc=2)
+    chunks = retriever.retrieve(query="matching", top_k=8, vector_k=8, keyword_k=0, max_per_doc=2)
     counts: dict[str, int] = {}
     for chunk in chunks:
         counts[chunk.arxiv_id] = counts.get(chunk.arxiv_id, 0) + 1
