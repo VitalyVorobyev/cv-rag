@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
 import uuid
 
 import httpx
@@ -8,13 +9,25 @@ from rich.console import Console
 from rich.table import Table
 import typer
 
-from cv_rag.arxiv_sync import download_pdf, fetch_cs_cv_papers, write_metadata_json
+from cv_rag.arxiv_sync import (
+    PaperMetadata,
+    download_pdf,
+    fetch_cs_cv_papers,
+    fetch_papers_by_ids,
+    write_metadata_json,
+)
 from cv_rag.chunking import chunk_sections
 from cv_rag.config import get_settings
 from cv_rag.embeddings import OllamaEmbedClient
 from cv_rag.grobid_client import pdf_to_tei
 from cv_rag.qdrant_store import QdrantStore, VectorPoint
-from cv_rag.retrieve import HybridRetriever, build_answer_prompt, format_citation
+from cv_rag.retrieve import (
+    HybridRetriever,
+    NoRelevantSourcesError,
+    build_answer_prompt,
+    build_strict_answer_prompt,
+    format_citation,
+)
 from cv_rag.sqlite_store import SQLiteStore
 from cv_rag.tei_extract import extract_sections
 
@@ -40,47 +53,21 @@ def _load_tei_or_parse(pdf_path: Path, tei_path: Path, force: bool) -> str:
     return tei_xml
 
 
-@app.command()
-def ingest(
-    limit: int = typer.Option(
-        None,
-        "--limit",
-        "-n",
-        help="Number of newest cs.CV papers to ingest.",
-    ),
-    force_grobid: bool = typer.Option(
-        False,
-        help="Re-run GROBID parsing even when TEI already exists.",
-    ),
-    embed_batch_size: int = typer.Option(
-        None,
-        help="Embedding batch size override.",
-    ),
+def _ingest_papers(
+    papers: list[PaperMetadata],
+    metadata_json_path: Path,
+    force_grobid: bool,
+    embed_batch_size: int | None,
 ) -> None:
     settings = get_settings()
-    settings.ensure_directories()
-
-    use_limit = limit or settings.default_arxiv_limit
     use_batch_size = embed_batch_size or settings.embed_batch_size
 
-    console.print(
-        f"[bold]Fetching newest cs.CV papers from arXiv (limit={use_limit})...[/bold]"
-    )
-    papers = fetch_cs_cv_papers(
-        limit=use_limit,
-        arxiv_api_url=settings.arxiv_api_url,
-        timeout_seconds=settings.http_timeout_seconds,
-        user_agent=settings.user_agent,
-        max_retries=settings.arxiv_max_retries,
-        backoff_start_seconds=settings.arxiv_backoff_start_seconds,
-        backoff_cap_seconds=settings.arxiv_backoff_cap_seconds,
-    )
     if not papers:
-        console.print("[yellow]No papers returned from arXiv.[/yellow]")
+        console.print("[yellow]No papers to ingest.[/yellow]")
         raise typer.Exit(code=1)
 
-    write_metadata_json(papers, settings.metadata_json_path)
-    console.print(f"Saved metadata: {settings.metadata_json_path}")
+    write_metadata_json(papers, metadata_json_path)
+    console.print(f"Saved metadata: {metadata_json_path}")
 
     sqlite_store = SQLiteStore(settings.sqlite_path)
     sqlite_store.create_schema()
@@ -177,11 +164,98 @@ def ingest(
 
 
 @app.command()
+def ingest(
+    limit: int = typer.Option(
+        None,
+        "--limit",
+        "-n",
+        help="Number of newest cs.CV papers to ingest.",
+    ),
+    force_grobid: bool = typer.Option(
+        False,
+        help="Re-run GROBID parsing even when TEI already exists.",
+    ),
+    embed_batch_size: int = typer.Option(
+        None,
+        help="Embedding batch size override.",
+    ),
+) -> None:
+    settings = get_settings()
+    settings.ensure_directories()
+
+    use_limit = limit or settings.default_arxiv_limit
+
+    console.print(
+        f"[bold]Fetching newest cs.CV papers from arXiv (limit={use_limit})...[/bold]"
+    )
+    papers = fetch_cs_cv_papers(
+        limit=use_limit,
+        arxiv_api_url=settings.arxiv_api_url,
+        timeout_seconds=settings.http_timeout_seconds,
+        user_agent=settings.user_agent,
+        max_retries=settings.arxiv_max_retries,
+        backoff_start_seconds=settings.arxiv_backoff_start_seconds,
+        backoff_cap_seconds=settings.arxiv_backoff_cap_seconds,
+    )
+    if not papers:
+        console.print("[yellow]No papers returned from arXiv.[/yellow]")
+        raise typer.Exit(code=1)
+
+    _ingest_papers(
+        papers=papers,
+        metadata_json_path=settings.metadata_json_path,
+        force_grobid=force_grobid,
+        embed_batch_size=embed_batch_size,
+    )
+
+
+@app.command("ingest-ids")
+def ingest_ids(
+    ids: list[str] = typer.Argument(
+        ...,
+        help="One or more arXiv IDs to ingest (example: 2104.00680 1911.11763).",
+    ),
+    force_grobid: bool = typer.Option(
+        False,
+        help="Re-run GROBID parsing even when TEI already exists.",
+    ),
+    embed_batch_size: int = typer.Option(
+        None,
+        help="Embedding batch size override.",
+    ),
+) -> None:
+    settings = get_settings()
+    settings.ensure_directories()
+
+    console.print(f"[bold]Fetching metadata for explicit arXiv IDs ({len(ids)})...[/bold]")
+    papers = fetch_papers_by_ids(
+        ids=ids,
+        arxiv_api_url=settings.arxiv_api_url,
+        timeout_seconds=settings.http_timeout_seconds,
+        user_agent=settings.user_agent,
+        max_retries=settings.arxiv_max_retries,
+        backoff_start_seconds=settings.arxiv_backoff_start_seconds,
+        backoff_cap_seconds=settings.arxiv_backoff_cap_seconds,
+    )
+    if not papers:
+        console.print("[yellow]No valid arXiv IDs provided.[/yellow]")
+        raise typer.Exit(code=1)
+
+    metadata_path = settings.metadata_dir / "arxiv_selected_ids.json"
+    _ingest_papers(
+        papers=papers,
+        metadata_json_path=metadata_path,
+        force_grobid=force_grobid,
+        embed_batch_size=embed_batch_size,
+    )
+
+
+@app.command()
 def query(
     question: str = typer.Argument(..., help="Question to ask against local index."),
-    top_k: int = typer.Option(8, help="Final number of merged chunks to keep."),
-    vector_k: int = typer.Option(12, help="Top-k vector hits from Qdrant."),
-    keyword_k: int = typer.Option(12, help="Top-k keyword hits from SQLite FTS."),
+    top_k: int = typer.Option(8, "--top-k", "-k", help="Final number of merged chunks to keep."),
+    vector_k: int = typer.Option(12, "--vector-k", help="Top-k vector hits from Qdrant."),
+    keyword_k: int = typer.Option(12, "--keyword-k", help="Top-k keyword hits from SQLite FTS."),
 ) -> None:
     settings = get_settings()
 
@@ -231,6 +305,129 @@ def query(
     prompt = build_answer_prompt(question, chunks)
     console.print("\n[bold]Answer prompt template:[/bold]")
     console.print(prompt)
+
+
+@app.command()
+def answer(
+    question: str = typer.Argument(..., help="Question to answer from local index."),
+    k: int = typer.Option(10, "--k", help="Number of sources to include."),
+    model: str = typer.Option(..., "--model", help="MLX model ID, local path, or HF repo."),
+    max_tokens: int = typer.Option(600, "--max-tokens", help="Maximum tokens to generate."),
+    temperature: float = typer.Option(0.2, "--temperature", help="Sampling temperature."),
+    top_p: float = typer.Option(0.9, "--top-p", help="Sampling top-p."),
+    seed: int | None = typer.Option(None, "--seed", help="Optional random seed."),
+    show_sources: bool = typer.Option(
+        False,
+        "--show-sources",
+        help="Print retrieved sources before generating the final answer.",
+    ),
+) -> None:
+    settings = get_settings()
+
+    sqlite_store = SQLiteStore(settings.sqlite_path)
+    sqlite_store.create_schema()
+    qdrant_store = QdrantStore(
+        url=settings.qdrant_url,
+        collection_name=settings.qdrant_collection,
+    )
+    embed_client = OllamaEmbedClient(
+        base_url=settings.ollama_url,
+        model=settings.ollama_model,
+        timeout_seconds=settings.http_timeout_seconds,
+    )
+
+    retriever = HybridRetriever(
+        embedder=embed_client,
+        qdrant_store=qdrant_store,
+        sqlite_store=sqlite_store,
+    )
+
+    try:
+        chunks = retriever.retrieve(
+            query=question,
+            top_k=k,
+            vector_k=max(k, 12),
+            keyword_k=max(k, 12),
+            require_relevance=True,
+        )
+    except NoRelevantSourcesError as exc:
+        console.print("Not found in indexed corpus. Try: cv-rag ingest-ids 2104.00680 1911.11763")
+        if exc.candidates:
+            table = Table(title="Maybe Relevant (Top 3)")
+            table.add_column("Rank", justify="right")
+            table.add_column("Citation")
+            table.add_column("Preview")
+            for idx, chunk in enumerate(exc.candidates[:3], start=1):
+                citation = format_citation(chunk.arxiv_id, chunk.section_title)
+                preview = chunk.text[:160].replace("\n", " ")
+                table.add_row(str(idx), citation, preview)
+            console.print(table)
+        raise typer.Exit(code=1)
+    finally:
+        sqlite_store.close()
+
+    if not chunks:
+        console.print("[red]No sources retrieved for this question. Run ingest first or broaden the query.[/red]")
+        raise typer.Exit(code=1)
+
+    if show_sources:
+        table = Table(title="Retrieved Sources")
+        table.add_column("Source")
+        table.add_column("arXiv ID")
+        table.add_column("Title")
+        table.add_column("Section")
+        table.add_column("Preview")
+        for idx, chunk in enumerate(chunks, start=1):
+            preview = chunk.text[:140].replace("\n", " ")
+            section = chunk.section_title.strip() or "Untitled"
+            table.add_row(f"S{idx}", chunk.arxiv_id, chunk.title, section, preview)
+        console.print(table)
+
+    prompt = build_strict_answer_prompt(question, chunks)
+    command = [
+        "mlx_lm.generate",
+        "--model",
+        model,
+        "--prompt",
+        prompt,
+        "--max-tokens",
+        str(max_tokens),
+        "--temp",
+        str(temperature),
+        "--top-p",
+        str(top_p),
+        "--verbose",
+        "False",
+    ]
+    if seed is not None:
+        command.extend(["--seed", str(seed)])
+
+    try:
+        result = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        console.print("[red]`mlx_lm.generate` was not found in PATH.[/red]")
+        raise typer.Exit(code=1) from None
+
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        if detail:
+            console.print(f"[red]MLX generation failed: {detail}[/red]")
+        else:
+            console.print(f"[red]MLX generation failed with exit code {result.returncode}.[/red]")
+        raise typer.Exit(code=1)
+
+    answer_text = result.stdout.strip()
+    if not answer_text:
+        console.print("[red]MLX generation returned an empty answer.[/red]")
+        raise typer.Exit(code=1)
+
+    console.print("\n[bold]Answer[/bold]")
+    console.print(answer_text)
 
 
 @app.command()

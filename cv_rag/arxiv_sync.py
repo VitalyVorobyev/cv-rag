@@ -165,6 +165,51 @@ def _fetch_arxiv_api_feed(
     raise RuntimeError("arXiv request failed before receiving a response body")
 
 
+def _fetch_arxiv_id_feed(
+    arxiv_api_url: str,
+    ids: list[str],
+    timeout_seconds: float,
+    user_agent: str,
+    max_retries: int,
+    backoff_start_seconds: float,
+    backoff_cap_seconds: float,
+) -> str:
+    if not ids:
+        return ""
+
+    params = {"id_list": ",".join(ids)}
+    headers = {"User-Agent": user_agent}
+    attempts = max(1, max_retries)
+    delay = max(backoff_start_seconds, 0.0)
+
+    with httpx.Client(timeout=timeout_seconds, headers=headers, follow_redirects=True) as client:
+        for attempt in range(1, attempts + 1):
+            try:
+                response = client.get(arxiv_api_url, params=params)
+            except httpx.HTTPError as exc:
+                if attempt >= attempts:
+                    raise RuntimeError(
+                        f"arXiv ID request failed after {attempts} attempts ({exc.__class__.__name__})"
+                    ) from exc
+                time.sleep(min(delay, backoff_cap_seconds))
+                delay = min(max(delay * 2, 1.0), backoff_cap_seconds)
+                continue
+
+            if response.status_code == 429 or response.status_code >= 500:
+                if attempt >= attempts:
+                    response.raise_for_status()
+                retry_after = _parse_retry_after_seconds(response.headers.get("Retry-After"))
+                sleep_seconds = retry_after if retry_after is not None else min(delay, backoff_cap_seconds)
+                time.sleep(max(sleep_seconds, 0.0))
+                delay = min(max(delay * 2, 1.0), backoff_cap_seconds)
+                continue
+
+            response.raise_for_status()
+            return response.text
+
+    raise RuntimeError("arXiv ID request failed before receiving a response body")
+
+
 def _fetch_arxiv_rss_feed(timeout_seconds: float, user_agent: str) -> str:
     headers = {"User-Agent": user_agent}
     with httpx.Client(timeout=timeout_seconds, headers=headers, follow_redirects=True) as client:
@@ -273,6 +318,89 @@ def fetch_cs_cv_papers(
 
     rss_feed = _fetch_arxiv_rss_feed(timeout_seconds=timeout_seconds, user_agent=user_agent)
     return _parse_rss_feed(rss_feed, limit=limit)
+
+
+def _canonical_requested_id(raw_id: str) -> str:
+    normalized = normalize_arxiv_id(raw_id)
+    if not normalized:
+        return ""
+    version = extract_version(raw_id)
+    return f"{normalized}{version or ''}"
+
+
+def fetch_papers_by_ids(
+    ids: list[str],
+    arxiv_api_url: str,
+    timeout_seconds: float,
+    user_agent: str,
+    max_retries: int = 5,
+    backoff_start_seconds: float = 2.0,
+    backoff_cap_seconds: float = 30.0,
+) -> list[PaperMetadata]:
+    requested_ids: list[str] = []
+    seen: set[str] = set()
+    for raw in ids:
+        cleaned = _canonical_requested_id(raw)
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        requested_ids.append(cleaned)
+
+    if not requested_ids:
+        return []
+
+    fetched: list[PaperMetadata] = []
+    try:
+        api_feed = _fetch_arxiv_id_feed(
+            arxiv_api_url=arxiv_api_url,
+            ids=requested_ids,
+            timeout_seconds=timeout_seconds,
+            user_agent=user_agent,
+            max_retries=max_retries,
+            backoff_start_seconds=backoff_start_seconds,
+            backoff_cap_seconds=backoff_cap_seconds,
+        )
+        if api_feed:
+            fetched = _parse_api_feed(api_feed)
+    except Exception:  # noqa: BLE001
+        fetched = []
+
+    by_versioned: dict[str, PaperMetadata] = {}
+    by_base: dict[str, PaperMetadata] = {}
+    for paper in fetched:
+        if paper.arxiv_id_with_version:
+            by_versioned[paper.arxiv_id_with_version] = paper
+        by_base[paper.arxiv_id] = paper
+
+    papers: list[PaperMetadata] = []
+    for requested_id in requested_ids:
+        base_id = normalize_arxiv_id(requested_id)
+        requested_version = extract_version(requested_id)
+        download_id = requested_id if requested_version else base_id
+
+        source = by_versioned.get(download_id) or by_base.get(base_id)
+        title = source.title if source and source.title else f"arXiv:{download_id}"
+        summary = source.summary if source else ""
+        authors = source.authors if source else []
+        published = source.published if source else None
+        updated = source.updated if source else None
+
+        papers.append(
+            PaperMetadata(
+                arxiv_id=base_id,
+                arxiv_id_with_version=download_id,
+                version=requested_version or (source.version if source else None),
+                title=title,
+                summary=summary,
+                published=published,
+                updated=updated,
+                authors=authors,
+                pdf_url=f"https://arxiv.org/pdf/{download_id}.pdf",
+                abs_url=f"https://arxiv.org/abs/{download_id}",
+            )
+        )
+
+    return papers
 
 
 def download_pdf(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import re
 from typing import Any
 
 from cv_rag.embeddings import OllamaEmbedClient
@@ -19,6 +20,44 @@ class RetrievedChunk:
     vector_score: float | None = None
     keyword_score: float | None = None
     sources: set[str] = field(default_factory=set)
+
+
+QUERY_TOKEN_RE = re.compile(r"[a-z0-9]+")
+COMMON_QUERY_TERMS = {
+    "about",
+    "against",
+    "between",
+    "compare",
+    "difference",
+    "differences",
+    "does",
+    "each",
+    "explain",
+    "fails",
+    "from",
+    "idea",
+    "into",
+    "key",
+    "method",
+    "objective",
+    "paper",
+    "show",
+    "shows",
+    "summarize",
+    "their",
+    "them",
+    "these",
+    "this",
+    "training",
+    "when",
+    "with",
+}
+
+
+class NoRelevantSourcesError(RuntimeError):
+    def __init__(self, candidates: list[RetrievedChunk]) -> None:
+        super().__init__("no relevant sources")
+        self.candidates = candidates
 
 
 def format_citation(arxiv_id: str, section_title: str) -> str:
@@ -45,6 +84,8 @@ class HybridRetriever:
         top_k: int = 8,
         vector_k: int = 12,
         keyword_k: int = 12,
+        require_relevance: bool = False,
+        vector_score_threshold: float = 0.45,
     ) -> list[RetrievedChunk]:
         query_vector = self.embedder.embed_texts([query])[0]
         vector_hits = self.qdrant_store.search(query_vector, limit=vector_k)
@@ -56,7 +97,13 @@ class HybridRetriever:
         self._merge_hits(by_id, keyword_hits, source="keyword", score_field="score")
 
         ranked = sorted(by_id.values(), key=lambda item: item.fused_score, reverse=True)
-        return ranked[:top_k]
+        deduped = self._dedupe_ranked_chunks(ranked)
+        shortlist = deduped[: max(top_k, 3)]
+
+        if require_relevance and self._is_irrelevant_result(query, shortlist, vector_score_threshold):
+            raise NoRelevantSourcesError(shortlist[:3])
+
+        return deduped[:top_k]
 
     def _merge_hits(
         self,
@@ -91,6 +138,64 @@ class HybridRetriever:
             if source == "keyword" and raw_score is not None:
                 item.keyword_score = float(raw_score)
 
+    @staticmethod
+    def _dedupe_ranked_chunks(chunks: list[RetrievedChunk]) -> list[RetrievedChunk]:
+        deduped: list[RetrievedChunk] = []
+        seen: set[tuple[str, str, str]] = set()
+        for chunk in chunks:
+            key = (
+                chunk.arxiv_id,
+                chunk.section_title.strip().casefold(),
+                chunk.chunk_id,
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(chunk)
+        return deduped
+
+    @staticmethod
+    def _extract_rare_query_terms(query: str) -> list[str]:
+        terms = QUERY_TOKEN_RE.findall(query.casefold())
+        out: list[str] = []
+        seen: set[str] = set()
+        for term in terms:
+            if term in COMMON_QUERY_TERMS:
+                continue
+            if len(term) < 5 and not any(char.isdigit() for char in term):
+                continue
+            if term in seen:
+                continue
+            seen.add(term)
+            out.append(term)
+        return out
+
+    def _is_irrelevant_result(
+        self,
+        query: str,
+        candidates: list[RetrievedChunk],
+        vector_score_threshold: float,
+    ) -> bool:
+        if not candidates:
+            return True
+
+        rare_terms = self._extract_rare_query_terms(query)
+        if not rare_terms:
+            return False
+
+        overlap_found = False
+        for chunk in candidates:
+            haystack = f"{chunk.title}\n{chunk.text}".casefold()
+            if any(term in haystack for term in rare_terms):
+                overlap_found = True
+                break
+
+        max_vector = max(
+            (chunk.vector_score for chunk in candidates if chunk.vector_score is not None),
+            default=-1.0,
+        )
+        return (not overlap_found) and (max_vector < vector_score_threshold)
+
 
 def build_answer_prompt(query: str, chunks: list[RetrievedChunk]) -> str:
     lines: list[str] = []
@@ -108,5 +213,35 @@ def build_answer_prompt(query: str, chunks: list[RetrievedChunk]) -> str:
         lines.append(chunk.text)
         lines.append("")
 
+    lines.append("Answer:")
+    return "\n".join(lines)
+
+
+def build_strict_answer_prompt(question: str, chunks: list[RetrievedChunk]) -> str:
+    lines: list[str] = []
+    lines.append("You are a careful computer vision research assistant.")
+    lines.append("")
+    lines.append("Question:")
+    lines.append(question)
+    lines.append("")
+    lines.append("Sources:")
+
+    for idx, chunk in enumerate(chunks, start=1):
+        section = chunk.section_title.strip() or "Untitled"
+        snippet = " ".join(chunk.text.split())
+        lines.append(f"[S{idx}]")
+        lines.append(f"arxiv_id: {chunk.arxiv_id}")
+        lines.append(f"title: {chunk.title}")
+        lines.append(f"section: {section}")
+        lines.append(f"text: {snippet}")
+        lines.append("")
+
+    lines.append("Rules:")
+    lines.append("1. Only use information supported by the sources.")
+    lines.append("2. Every non-trivial claim must include citations like [S3][S7].")
+    lines.append("3. If sources are insufficient, state what is missing and ask one clarifying question.")
+    lines.append("4. Prefer comparisons and what each paper claims or shows.")
+    lines.append("5. Do not fabricate details, metrics, or citations.")
+    lines.append("")
     lines.append("Answer:")
     return "\n".join(lines)
