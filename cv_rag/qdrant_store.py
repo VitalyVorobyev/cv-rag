@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+import uuid
 
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qmodels
@@ -56,11 +57,26 @@ class QdrantStore:
             self.client.upsert(
                 collection_name=self.collection_name,
                 points=[
-                    qmodels.PointStruct(id=p.point_id, vector=p.vector, payload=p.payload)
+                    qmodels.PointStruct(
+                        id=self._normalize_point_id(p.point_id),
+                        vector=p.vector,
+                        payload=p.payload,
+                    )
                     for p in batch
                 ],
                 wait=True,
             )
+
+    @staticmethod
+    def _normalize_point_id(point_id: str | int) -> str | int:
+        if isinstance(point_id, int):
+            return point_id
+        text_id = str(point_id)
+        try:
+            uuid.UUID(text_id)
+            return text_id
+        except ValueError:
+            return str(uuid.uuid5(uuid.NAMESPACE_URL, text_id))
 
     def search(self, query_vector: list[float], limit: int) -> list[dict[str, Any]]:
         try:

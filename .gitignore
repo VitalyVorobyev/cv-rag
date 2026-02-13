@@ -1,0 +1,4 @@
+*.pyc
+uv.lock
+data
+qdrant_storage

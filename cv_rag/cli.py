@@ -71,6 +71,9 @@ def ingest(
         arxiv_api_url=settings.arxiv_api_url,
         timeout_seconds=settings.http_timeout_seconds,
         user_agent=settings.user_agent,
+        max_retries=settings.arxiv_max_retries,
+        backoff_start_seconds=settings.arxiv_backoff_start_seconds,
+        backoff_cap_seconds=settings.arxiv_backoff_cap_seconds,
     )
     if not papers:
         console.print("[yellow]No papers returned from arXiv.[/yellow]")

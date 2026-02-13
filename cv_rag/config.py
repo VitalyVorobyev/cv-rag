@@ -11,7 +11,7 @@ class Settings(BaseModel):
     qdrant_url: str = "http://localhost:6333"
     grobid_url: str = "http://localhost:8070"
     ollama_url: str = "http://localhost:11434"
-    arxiv_api_url: str = "http://export.arxiv.org/api/query"
+    arxiv_api_url: str = "https://export.arxiv.org/api/query"
     data_dir: Path = Path("data")
     pdf_dir: Path = Path("data/pdfs")
     tei_dir: Path = Path("data/tei")
@@ -24,6 +24,9 @@ class Settings(BaseModel):
     chunk_max_chars: int = 1200
     chunk_overlap_chars: int = 200
     http_timeout_seconds: float = 120.0
+    arxiv_max_retries: int = 5
+    arxiv_backoff_start_seconds: float = 2.0
+    arxiv_backoff_cap_seconds: float = 30.0
     grobid_max_retries: int = 8
     grobid_backoff_start_seconds: float = 2.0
     grobid_backoff_cap_seconds: float = 20.0
@@ -48,7 +51,7 @@ def get_settings() -> Settings:
         qdrant_url=os.getenv("CV_RAG_QDRANT_URL", "http://localhost:6333"),
         grobid_url=os.getenv("CV_RAG_GROBID_URL", "http://localhost:8070"),
         ollama_url=os.getenv("CV_RAG_OLLAMA_URL", "http://localhost:11434"),
-        arxiv_api_url=os.getenv("CV_RAG_ARXIV_API_URL", "http://export.arxiv.org/api/query"),
+        arxiv_api_url=os.getenv("CV_RAG_ARXIV_API_URL", "https://export.arxiv.org/api/query"),
         data_dir=data_dir,
         pdf_dir=pdf_dir,
         tei_dir=tei_dir,
@@ -63,6 +66,9 @@ def get_settings() -> Settings:
         chunk_max_chars=int(os.getenv("CV_RAG_CHUNK_MAX_CHARS", "1200")),
         chunk_overlap_chars=int(os.getenv("CV_RAG_CHUNK_OVERLAP", "200")),
         http_timeout_seconds=float(os.getenv("CV_RAG_HTTP_TIMEOUT", "120")),
+        arxiv_max_retries=int(os.getenv("CV_RAG_ARXIV_MAX_RETRIES", "5")),
+        arxiv_backoff_start_seconds=float(os.getenv("CV_RAG_ARXIV_BACKOFF_START", "2")),
+        arxiv_backoff_cap_seconds=float(os.getenv("CV_RAG_ARXIV_BACKOFF_CAP", "30")),
         grobid_max_retries=int(os.getenv("CV_RAG_GROBID_MAX_RETRIES", "8")),
         grobid_backoff_start_seconds=float(os.getenv("CV_RAG_GROBID_BACKOFF_START", "2")),
         grobid_backoff_cap_seconds=float(os.getenv("CV_RAG_GROBID_BACKOFF_CAP", "20")),
