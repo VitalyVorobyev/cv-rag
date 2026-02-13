@@ -23,6 +23,7 @@ class RetrievedChunk:
 
 
 QUERY_TOKEN_RE = re.compile(r"[a-z0-9]+")
+SECTION_PRIORITY_RE = re.compile(r"(method|approach|architecture|supervision|loss|training)", re.IGNORECASE)
 COMMON_QUERY_TERMS = {
     "about",
     "against",
@@ -86,6 +87,8 @@ class HybridRetriever:
         keyword_k: int = 12,
         require_relevance: bool = False,
         vector_score_threshold: float = 0.45,
+        max_chunks_per_doc: int = 4,
+        section_boost: float = 0.0,
     ) -> list[RetrievedChunk]:
         query_vector = self.embedder.embed_texts([query])[0]
         vector_hits = self.qdrant_store.search(query_vector, limit=vector_k)
@@ -96,14 +99,20 @@ class HybridRetriever:
         self._merge_hits(by_id, vector_hits, source="vector", score_field="score")
         self._merge_hits(by_id, keyword_hits, source="keyword", score_field="score")
 
+        if section_boost > 0:
+            for item in by_id.values():
+                if self._matches_priority_section(item):
+                    item.fused_score += section_boost
+
         ranked = sorted(by_id.values(), key=lambda item: item.fused_score, reverse=True)
         deduped = self._dedupe_ranked_chunks(ranked)
-        shortlist = deduped[: max(top_k, 3)]
+        quota_limited = self._apply_doc_quota(deduped, max_chunks_per_doc=max_chunks_per_doc)
+        shortlist = quota_limited[: max(top_k, 3)]
 
         if require_relevance and self._is_irrelevant_result(query, shortlist, vector_score_threshold):
             raise NoRelevantSourcesError(shortlist[:3])
 
-        return deduped[:top_k]
+        return quota_limited[:top_k]
 
     def _merge_hits(
         self,
@@ -153,6 +162,25 @@ class HybridRetriever:
             seen.add(key)
             deduped.append(chunk)
         return deduped
+
+    @staticmethod
+    def _apply_doc_quota(chunks: list[RetrievedChunk], max_chunks_per_doc: int) -> list[RetrievedChunk]:
+        if max_chunks_per_doc <= 0:
+            return chunks
+        out: list[RetrievedChunk] = []
+        per_doc_counts: dict[str, int] = {}
+        for chunk in chunks:
+            count = per_doc_counts.get(chunk.arxiv_id, 0)
+            if count >= max_chunks_per_doc:
+                continue
+            per_doc_counts[chunk.arxiv_id] = count + 1
+            out.append(chunk)
+        return out
+
+    @staticmethod
+    def _matches_priority_section(chunk: RetrievedChunk) -> bool:
+        haystack = f"{chunk.title}\n{chunk.section_title}"
+        return SECTION_PRIORITY_RE.search(haystack) is not None
 
     @staticmethod
     def _extract_rare_query_terms(query: str) -> list[str]:

@@ -108,3 +108,84 @@ def test_dedupe_by_arxiv_section_chunk_id() -> None:
 
     deduped = HybridRetriever._dedupe_ranked_chunks(chunks)
     assert len(deduped) == 1
+
+
+def test_section_boost_promotes_method_section() -> None:
+    qdrant_hits = [
+        {
+            "chunk_id": "a:0",
+            "arxiv_id": "1000.00001",
+            "title": "Paper A",
+            "section_title": "Introduction",
+            "text": "General overview",
+            "score": 0.95,
+        },
+        {
+            "chunk_id": "b:0",
+            "arxiv_id": "1000.00002",
+            "title": "Paper B",
+            "section_title": "Method",
+            "text": "Our approach details",
+            "score": 0.90,
+        },
+    ]
+
+    retriever = HybridRetriever(
+        embedder=DummyEmbedder(),
+        qdrant_store=DummyQdrantStore(qdrant_hits),
+        sqlite_store=DummySQLiteStore([]),
+    )
+
+    without_boost = retriever.retrieve(query="matching", top_k=2, vector_k=2, keyword_k=0, section_boost=0.0)
+    with_boost = retriever.retrieve(query="matching", top_k=2, vector_k=2, keyword_k=0, section_boost=0.01)
+
+    assert without_boost[0].arxiv_id == "1000.00001"
+    assert with_boost[0].arxiv_id == "1000.00002"
+
+
+def test_max_chunks_per_doc_quota_is_enforced() -> None:
+    qdrant_hits: list[dict[str, object]] = []
+    for i in range(6):
+        qdrant_hits.append(
+            {
+                "chunk_id": f"a:{i}",
+                "arxiv_id": "2000.00001",
+                "title": "Paper A",
+                "section_title": "Method",
+                "text": f"chunk {i}",
+                "score": 0.9 - i * 0.01,
+            }
+        )
+    qdrant_hits.extend(
+        [
+            {
+                "chunk_id": "b:0",
+                "arxiv_id": "2000.00002",
+                "title": "Paper B",
+                "section_title": "Method",
+                "text": "chunk b",
+                "score": 0.6,
+            },
+            {
+                "chunk_id": "c:0",
+                "arxiv_id": "2000.00003",
+                "title": "Paper C",
+                "section_title": "Method",
+                "text": "chunk c",
+                "score": 0.5,
+            },
+        ]
+    )
+
+    retriever = HybridRetriever(
+        embedder=DummyEmbedder(),
+        qdrant_store=DummyQdrantStore(qdrant_hits),
+        sqlite_store=DummySQLiteStore([]),
+    )
+
+    chunks = retriever.retrieve(query="matching", top_k=8, vector_k=8, keyword_k=0, max_chunks_per_doc=2)
+    counts: dict[str, int] = {}
+    for chunk in chunks:
+        counts[chunk.arxiv_id] = counts.get(chunk.arxiv_id, 0) + 1
+
+    assert counts["2000.00001"] == 2

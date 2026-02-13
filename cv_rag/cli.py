@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import subprocess
 import uuid
 
@@ -24,6 +25,7 @@ from cv_rag.qdrant_store import QdrantStore, VectorPoint
 from cv_rag.retrieve import (
     HybridRetriever,
     NoRelevantSourcesError,
+    RetrievedChunk,
     build_answer_prompt,
     build_strict_answer_prompt,
     format_citation,
@@ -34,6 +36,11 @@ from cv_rag.tei_extract import extract_sections
 
 app = typer.Typer(help="Local CV papers RAG MVP")
 console = Console()
+COMPARISON_QUERY_RE = re.compile(
+    r"\b(compare|comparison|versus|vs\.?|difference|different|better than|worse than)\b",
+    re.IGNORECASE,
+)
+CITATION_REF_RE = re.compile(r"\[S\d+\]")
 
 
 def _load_tei_or_parse(pdf_path: Path, tei_path: Path, force: bool) -> str:
@@ -51,6 +58,75 @@ def _load_tei_or_parse(pdf_path: Path, tei_path: Path, force: bool) -> str:
     )
     tei_path.write_text(tei_xml, encoding="utf-8")
     return tei_xml
+
+
+def _is_comparison_question(question: str) -> bool:
+    return COMPARISON_QUERY_RE.search(question) is not None
+
+
+def _top_doc_source_counts(chunks: list[RetrievedChunk]) -> list[tuple[str, int]]:
+    if not chunks:
+        return []
+    best_scores: dict[str, float] = {}
+    counts: dict[str, int] = {}
+    for chunk in chunks:
+        counts[chunk.arxiv_id] = counts.get(chunk.arxiv_id, 0) + 1
+        best_scores[chunk.arxiv_id] = max(best_scores.get(chunk.arxiv_id, float("-inf")), chunk.fused_score)
+    top_docs = sorted(best_scores.keys(), key=lambda arxiv_id: best_scores[arxiv_id], reverse=True)[:2]
+    return [(arxiv_id, counts[arxiv_id]) for arxiv_id in top_docs]
+
+
+def _run_mlx_generate(
+    *,
+    model: str,
+    prompt: str,
+    max_tokens: int,
+    temperature: float,
+    top_p: float,
+    seed: int | None,
+) -> str:
+    command = [
+        "mlx_lm.generate",
+        "--model",
+        model,
+        "--prompt",
+        prompt,
+        "--max-tokens",
+        str(max_tokens),
+        "--temp",
+        str(temperature),
+        "--top-p",
+        str(top_p),
+        "--verbose",
+        "False",
+    ]
+    if seed is not None:
+        command.extend(["--seed", str(seed)])
+
+    try:
+        result = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        console.print("[red]`mlx_lm.generate` was not found in PATH.[/red]")
+        raise typer.Exit(code=1) from None
+
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        if detail:
+            console.print(f"[red]MLX generation failed: {detail}[/red]")
+        else:
+            console.print(f"[red]MLX generation failed with exit code {result.returncode}.[/red]")
+        raise typer.Exit(code=1)
+
+    answer_text = result.stdout.strip()
+    if not answer_text:
+        console.print("[red]MLX generation returned an empty answer.[/red]")
+        raise typer.Exit(code=1)
+    return answer_text
 
 
 def _ingest_papers(
@@ -256,6 +332,16 @@ def query(
     top_k: int = typer.Option(8, "--top-k", "-k", help="Final number of merged chunks to keep."),
     vector_k: int = typer.Option(12, "--vector-k", help="Top-k vector hits from Qdrant."),
     keyword_k: int = typer.Option(12, "--keyword-k", help="Top-k keyword hits from SQLite FTS."),
+    max_per_doc: int = typer.Option(
+        4,
+        "--max-per-doc",
+        help="Maximum number of chunks to keep per paper.",
+    ),
+    section_boost: float = typer.Option(
+        0.0,
+        "--section-boost",
+        help="Additive score boost for method/training-oriented section/title matches.",
+    ),
 ) -> None:
     settings = get_settings()
 
@@ -283,6 +369,8 @@ def query(
             top_k=top_k,
             vector_k=vector_k,
             keyword_k=keyword_k,
+            max_chunks_per_doc=max_per_doc,
+            section_boost=section_boost,
         )
     finally:
         sqlite_store.close()
@@ -316,6 +404,16 @@ def answer(
     temperature: float = typer.Option(0.2, "--temperature", help="Sampling temperature."),
     top_p: float = typer.Option(0.9, "--top-p", help="Sampling top-p."),
     seed: int | None = typer.Option(None, "--seed", help="Optional random seed."),
+    max_per_doc: int = typer.Option(
+        4,
+        "--max-per-doc",
+        help="Maximum number of chunks to keep per paper.",
+    ),
+    section_boost: float = typer.Option(
+        0.0,
+        "--section-boost",
+        help="Additive score boost for method/training-oriented section/title matches.",
+    ),
     show_sources: bool = typer.Option(
         False,
         "--show-sources",
@@ -349,6 +447,8 @@ def answer(
             vector_k=max(k, 12),
             keyword_k=max(k, 12),
             require_relevance=True,
+            max_chunks_per_doc=max_per_doc,
+            section_boost=section_boost,
         )
     except NoRelevantSourcesError as exc:
         console.print("Not found in indexed corpus. Try: cv-rag ingest-ids 2104.00680 1911.11763")
@@ -370,6 +470,19 @@ def answer(
         console.print("[red]No sources retrieved for this question. Run ingest first or broaden the query.[/red]")
         raise typer.Exit(code=1)
 
+    top_doc_counts = _top_doc_source_counts(chunks)
+    enough_cross_doc_support = len(top_doc_counts) >= 2 and all(count >= 2 for _, count in top_doc_counts)
+    if not enough_cross_doc_support:
+        console.print(
+            "[yellow]Warning: need at least 2 sources from each of the top 2 papers (by score) for robust comparison grounding.[/yellow]"
+        )
+        if top_doc_counts:
+            details = ", ".join(f"{arxiv_id} ({count})" for arxiv_id, count in top_doc_counts)
+            console.print(f"[yellow]Current top-paper source counts: {details}[/yellow]")
+        if _is_comparison_question(question):
+            console.print("[red]Refusing to answer comparison without sufficient cross-paper coverage.[/red]")
+            raise typer.Exit(code=1)
+
     if show_sources:
         table = Table(title="Retrieved Sources")
         table.add_column("Source")
@@ -384,47 +497,29 @@ def answer(
         console.print(table)
 
     prompt = build_strict_answer_prompt(question, chunks)
-    command = [
-        "mlx_lm.generate",
-        "--model",
-        model,
-        "--prompt",
-        prompt,
-        "--max-tokens",
-        str(max_tokens),
-        "--temp",
-        str(temperature),
-        "--top-p",
-        str(top_p),
-        "--verbose",
-        "False",
-    ]
-    if seed is not None:
-        command.extend(["--seed", str(seed)])
+    answer_text = _run_mlx_generate(
+        model=model,
+        prompt=prompt,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        top_p=top_p,
+        seed=seed,
+    )
 
-    try:
-        result = subprocess.run(
-            command,
-            check=False,
-            capture_output=True,
-            text=True,
+    min_citation_count = min(2, len(chunks))
+    if len(CITATION_REF_RE.findall(answer_text)) < min_citation_count:
+        revised_prompt = (
+            f"{prompt}\n\nYou forgot citations; revise.\n"
+            "Return a revised answer with inline citations like [S1][S3] for non-trivial claims."
         )
-    except FileNotFoundError:
-        console.print("[red]`mlx_lm.generate` was not found in PATH.[/red]")
-        raise typer.Exit(code=1) from None
-
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "").strip()
-        if detail:
-            console.print(f"[red]MLX generation failed: {detail}[/red]")
-        else:
-            console.print(f"[red]MLX generation failed with exit code {result.returncode}.[/red]")
-        raise typer.Exit(code=1)
-
-    answer_text = result.stdout.strip()
-    if not answer_text:
-        console.print("[red]MLX generation returned an empty answer.[/red]")
-        raise typer.Exit(code=1)
+        answer_text = _run_mlx_generate(
+            model=model,
+            prompt=revised_prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            seed=seed,
+        )
 
     console.print("\n[bold]Answer[/bold]")
     console.print(answer_text)

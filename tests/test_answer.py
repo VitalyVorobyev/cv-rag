@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
 
 from typer.testing import CliRunner
 
@@ -64,6 +65,8 @@ def test_answer_command_errors_when_no_sources_retrieved(
         keyword_k: int = 12,
         require_relevance: bool = False,
         vector_score_threshold: float = 0.45,
+        max_chunks_per_doc: int = 4,
+        section_boost: float = 0.0,
     ) -> list[RetrievedChunk]:
         return []
 
@@ -114,6 +117,8 @@ def test_answer_command_refuses_when_no_relevant_sources(
         keyword_k: int = 12,
         require_relevance: bool = False,
         vector_score_threshold: float = 0.45,
+        max_chunks_per_doc: int = 4,
+        section_boost: float = 0.0,
     ) -> list[RetrievedChunk]:
         candidates = [
             RetrievedChunk(
@@ -155,3 +160,190 @@ def test_answer_command_refuses_when_no_relevant_sources(
 
     assert result.exit_code == 1
     assert "Not found in indexed corpus. Try: cv-rag ingest-ids 2104.00680 1911.11763" in result.output
+
+
+def test_answer_refuses_comparison_when_top_doc_coverage_insufficient(
+    monkeypatch: object, tmp_path: Path
+) -> None:
+    runner = CliRunner()
+
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        pdf_dir=tmp_path / "data" / "pdfs",
+        tei_dir=tmp_path / "data" / "tei",
+        metadata_dir=tmp_path / "data" / "metadata",
+        metadata_json_path=tmp_path / "data" / "metadata" / "arxiv_cs_cv.json",
+        sqlite_path=tmp_path / "cv_rag.sqlite3",
+    )
+
+    class DummyQdrantStore:
+        def __init__(self, url: str, collection_name: str) -> None:
+            self.url = url
+            self.collection_name = collection_name
+
+    def fake_retrieve(
+        self: object,
+        query: str,
+        top_k: int = 8,
+        vector_k: int = 12,
+        keyword_k: int = 12,
+        require_relevance: bool = False,
+        vector_score_threshold: float = 0.45,
+        max_chunks_per_doc: int = 4,
+        section_boost: float = 0.0,
+    ) -> list[RetrievedChunk]:
+        return [
+            RetrievedChunk(
+                chunk_id="2104.00680:0",
+                arxiv_id="2104.00680",
+                title="LoFTR",
+                section_title="Method",
+                text="Details",
+                fused_score=0.9,
+                vector_score=0.7,
+            ),
+            RetrievedChunk(
+                chunk_id="2104.00680:1",
+                arxiv_id="2104.00680",
+                title="LoFTR",
+                section_title="Results",
+                text="More details",
+                fused_score=0.8,
+                vector_score=0.6,
+            ),
+            RetrievedChunk(
+                chunk_id="2104.00680:2",
+                arxiv_id="2104.00680",
+                title="LoFTR",
+                section_title="Ablation",
+                text="Even more details",
+                fused_score=0.7,
+                vector_score=0.5,
+            ),
+        ]
+
+    def fail_run(
+        cmd: list[str], check: bool, capture_output: bool, text: bool
+    ) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("LLM should not be called for insufficient comparison coverage")
+
+    monkeypatch.setattr(cli_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(cli_module, "QdrantStore", DummyQdrantStore)
+    monkeypatch.setattr(cli_module.HybridRetriever, "retrieve", fake_retrieve)
+    monkeypatch.setattr(cli_module.subprocess, "run", fail_run)
+
+    result = runner.invoke(
+        cli_module.app,
+        [
+            "answer",
+            "Compare LoFTR and SuperGlue",
+            "--k",
+            "8",
+            "--model",
+            "mlx-community/Qwen2.5-7B-Instruct-4bit",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "Refusing to answer comparison" in result.output
+
+
+def test_answer_reprompts_when_citations_missing(monkeypatch: object, tmp_path: Path) -> None:
+    runner = CliRunner()
+
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        pdf_dir=tmp_path / "data" / "pdfs",
+        tei_dir=tmp_path / "data" / "tei",
+        metadata_dir=tmp_path / "data" / "metadata",
+        metadata_json_path=tmp_path / "data" / "metadata" / "arxiv_cs_cv.json",
+        sqlite_path=tmp_path / "cv_rag.sqlite3",
+    )
+
+    class DummyQdrantStore:
+        def __init__(self, url: str, collection_name: str) -> None:
+            self.url = url
+            self.collection_name = collection_name
+
+    def fake_retrieve(
+        self: object,
+        query: str,
+        top_k: int = 8,
+        vector_k: int = 12,
+        keyword_k: int = 12,
+        require_relevance: bool = False,
+        vector_score_threshold: float = 0.45,
+        max_chunks_per_doc: int = 4,
+        section_boost: float = 0.0,
+    ) -> list[RetrievedChunk]:
+        return [
+            RetrievedChunk(
+                chunk_id="2104.00680:0",
+                arxiv_id="2104.00680",
+                title="LoFTR",
+                section_title="Method",
+                text="Details",
+                fused_score=0.9,
+                vector_score=0.8,
+            ),
+            RetrievedChunk(
+                chunk_id="2104.00680:1",
+                arxiv_id="2104.00680",
+                title="LoFTR",
+                section_title="Training",
+                text="Training details",
+                fused_score=0.85,
+                vector_score=0.75,
+            ),
+            RetrievedChunk(
+                chunk_id="1911.11763:0",
+                arxiv_id="1911.11763",
+                title="SuperGlue",
+                section_title="Method",
+                text="Details",
+                fused_score=0.8,
+                vector_score=0.7,
+            ),
+            RetrievedChunk(
+                chunk_id="1911.11763:1",
+                arxiv_id="1911.11763",
+                title="SuperGlue",
+                section_title="Training",
+                text="Training details",
+                fused_score=0.75,
+                vector_score=0.65,
+            ),
+        ]
+
+    calls: list[list[str]] = []
+
+    def fake_run(
+        cmd: list[str], check: bool, capture_output: bool, text: bool
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        if len(calls) == 1:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="Draft answer no citations", stderr="")
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="Revised answer [S1][S3]", stderr="")
+
+    monkeypatch.setattr(cli_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(cli_module, "QdrantStore", DummyQdrantStore)
+    monkeypatch.setattr(cli_module.HybridRetriever, "retrieve", fake_retrieve)
+    monkeypatch.setattr(cli_module.subprocess, "run", fake_run)
+
+    result = runner.invoke(
+        cli_module.app,
+        [
+            "answer",
+            "Explain LoFTR and SuperGlue",
+            "--k",
+            "8",
+            "--model",
+            "mlx-community/Qwen2.5-7B-Instruct-4bit",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Revised answer [S1][S3]" in result.output
+    assert len(calls) == 2
+    prompt_index = calls[1].index("--prompt") + 1
+    assert "You forgot citations; revise" in calls[1][prompt_index]
