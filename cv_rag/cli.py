@@ -1071,5 +1071,21 @@ def doctor(
     console.print(table)
 
 
+@app.command()
+def serve(
+    host: str = typer.Option("127.0.0.1", help="Bind host."),
+    port: int = typer.Option(8000, help="Bind port."),
+    reload: bool = typer.Option(False, help="Auto-reload on code changes."),
+) -> None:
+    """Start the web UI server."""
+    try:
+        import uvicorn
+    except ImportError:
+        console.print("[red]Web dependencies not installed. Run: uv sync --extra web[/red]")
+        raise typer.Exit(code=1) from None
+
+    uvicorn.run("cv_rag.api.app:create_app", host=host, port=port, reload=reload, factory=True)
+
+
 if __name__ == "__main__":
     app()

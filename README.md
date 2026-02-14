@@ -214,12 +214,47 @@ qdrant_storage/  # Qdrant persistent volume
 
 ---
 
+## Web UI
+
+A browser-based interface for chat Q&A, corpus browsing, and system monitoring.
+
+### Setup
+
+```bash
+# Install web dependencies (FastAPI + Uvicorn)
+uv sync --extra web
+
+# Start the server
+uv run cv-rag serve          # http://127.0.0.1:8000
+```
+
+### Pages
+
+* **Chat** (`/`) — conversational Q&A with streaming answers, clickable `[S#]` citations, and a source panel
+* **Papers** (`/papers`) — searchable paginated corpus browser with tier badges
+* **Stats** (`/stats`) — paper/chunk counts, tier distribution, top venues
+* **Health** (`/health`) — Qdrant, GROBID, Ollama connectivity status
+
+### Frontend development
+
+```bash
+# Terminal 1: backend
+uv run cv-rag serve --reload
+
+# Terminal 2: frontend (hot-reload, proxies /api → :8000)
+cd web && npm install && npm run dev   # http://localhost:5173
+```
+
+Production build: `cd web && npm run build` (outputs to `cv_rag/api/static/`, served by FastAPI).
+
+---
+
 ## Roadmap
 
 * Better section-aware retrieval and per-paper quotas
 * Optional reranking (late interaction / cross-encoder)
 * Continuous updates (daily arXiv sync job)
-* Export: “answer with bibliography” and “paper-to-notes” flows
+* Export: "answer with bibliography" and "paper-to-notes" flows
 
 ---
 

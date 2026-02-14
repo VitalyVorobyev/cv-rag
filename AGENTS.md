@@ -23,6 +23,15 @@ uv run cv-rag answer "vision transformers" --model <mlx-model-path>
 uv run cv-rag doctor
 uv run cv-rag curate --refresh-days 30
 
+# Web UI (install web deps, start server, open browser)
+uv sync --extra web
+uv run cv-rag serve                     # http://127.0.0.1:8000
+uv run cv-rag serve --reload            # dev mode with auto-reload
+
+# Frontend development (separate terminal)
+cd web && npm install && npm run dev    # http://localhost:5173 (proxies /api to :8000)
+cd web && npm run build                 # builds to cv_rag/api/static/
+
 # Run tests
 uv run pytest
 uv run pytest tests/test_answer.py::test_build_strict_answer_prompt_includes_sources_and_rules
@@ -56,6 +65,18 @@ cv_rag/
     retrieve.py       # HybridRetriever: RRF fusion of Qdrant vector + SQLite FTS5 BM25
     qdrant_store.py   # Qdrant vector DB wrapper
     sqlite_store.py   # SQLite FTS5 store for BM25 + metadata
+    api/              # FastAPI web UI backend (optional dep: uv sync --extra web)
+        app.py        # App factory, CORS, lifespan, static mount
+        deps.py       # FastAPI dependency injection
+        schemas.py    # Pydantic request/response models
+        streaming.py  # SSE helpers + mlx_generate_stream()
+        routers/      # health, stats, papers, search, answer endpoints
+web/                  # React + TypeScript + Tailwind frontend (Vite)
+    src/
+        pages/        # ChatPage, PapersPage, PaperDetailPage, StatsPage, HealthPage
+        components/   # layout/, chat/, papers/, stats/, health/
+        hooks/        # useChat, useHealth, useStats, usePapers
+        api/          # TypeScript API client + SSE streaming
 ```
 
 ### Ingestion Pipeline

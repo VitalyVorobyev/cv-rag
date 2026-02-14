@@ -2,3 +2,5 @@
 uv.lock
 data
 qdrant_storage
+web/node_modules
+cv_rag/api/static
