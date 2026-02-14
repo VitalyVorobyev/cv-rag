@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from cv_rag.arxiv_sync import PaperMetadata
-from cv_rag.sqlite_store import SQLiteStore
+from cv_rag.ingest.arxiv_client import PaperMetadata
+from cv_rag.storage.sqlite import SQLiteStore
 
 
 def test_keyword_search_handles_trailing_punctuation(tmp_path: Path) -> None:

@@ -36,7 +36,7 @@ uv run cv-rag serve --reload            # dev mode with auto-reload
 
 # Frontend development (separate terminal)
 cd web && npm install && npm run dev    # http://localhost:5173 (proxies /api to :8000)
-cd web && npm run build                 # builds to cv_rag/api/static/
+cd web && npm run build                 # builds to cv_rag/interfaces/api/static/
 
 # Run tests
 uv run pytest
@@ -58,59 +58,42 @@ uv run cv-rag -v ingest --limit 5
 
 ```
 cv_rag/
-    cli.py            # Thin Typer CLI wiring (~700 lines), delegates to service modules
-    config.py         # Pydantic Settings, env vars prefixed CV_RAG_
-    exceptions.py     # Exception hierarchy: CvRagError → IngestError, RetrievalError, GenerationError, CitationValidationError
-    http_retry.py     # Shared HTTP retry with exponential backoff (used by arxiv_sync, grobid_client)
-    llm.py            # MLX subprocess wrapper (mlx_generate), raises GenerationError
-    answer.py         # Answer utilities: citation validation, comparison coverage checks, retrieval merge helpers
-    prompts_answer.py # Mode-specific answer prompt templates and repair prompts
-    routing.py        # Rule/LLM answer router + retrieval distribution post-checks
-    seed_awesome.py   # GitHub awesome-list seeding (arXiv + DOI extraction)
-    openalex_resolve.py  # DOI -> OA PDF URL resolver via OpenAlex (+ cache)
-    ingest.py         # IngestPipeline: download → parse → chunk → embed → store
-    arxiv_sync.py     # ArXiv API feed fetching + PDF download
-    grobid_client.py  # GROBID PDF→TEI XML
-    tei_extract.py    # TEI XML → Section list
-    chunking.py       # Sliding window chunker (1200 chars, 200 overlap)
-    embeddings.py     # Ollama embedding client
-    retrieve.py       # HybridRetriever: RRF fusion of Qdrant vector + SQLite FTS5 BM25
-    qdrant_store.py   # Qdrant vector DB wrapper
-    sqlite_store.py   # SQLite FTS5 store for BM25 + metadata
-    api/              # FastAPI web UI backend (optional dep: uv sync --extra web)
-        app.py        # App factory, CORS, lifespan, static mount
-        deps.py       # FastAPI dependency injection
-        schemas.py    # Pydantic request/response models
-        streaming.py  # SSE helpers + mlx_generate_stream()
-        routers/      # health, stats, papers, search, answer endpoints
-web/                  # React + TypeScript + Tailwind frontend (Vite)
-    src/
-        pages/        # ChatPage, PapersPage, PaperDetailPage, StatsPage, HealthPage
-        components/   # layout/, chat/, papers/, stats/, health/
-        hooks/        # useChat, useHealth, useStats, usePapers
-        api/          # TypeScript API client + SSE streaming
+    app/bootstrap.py              # shared runtime construction (settings + stores + retriever)
+    shared/                       # settings, errors, shared HTTP/backoff helpers
+    storage/                      # sqlite + qdrant adapters, storage DTOs
+    ingest/                       # arXiv client, TEI/chunking pipeline, dedupe, ingest service
+    retrieval/                    # hybrid retrieval + relevance filtering helpers
+    answer/                       # routing, prompts, citation checks, answer service, MLX runner
+    curation/                     # semantic-scholar enrichment and tiering
+    seeding/                      # awesome-list and OpenAlex DOI seeding/resolution
+    interfaces/
+        cli/app.py                # Typer CLI entrypoint
+        cli/commands/             # command handlers by domain
+        api/                      # FastAPI app, routers, deps, schemas, static SPA mount
+    embeddings.py                 # Ollama embedding client
+web/                              # React + TypeScript + Tailwind frontend (Vite)
 ```
 
 ### Ingestion Pipeline
-ArXiv API → `arxiv_sync.py` (fetch metadata + PDFs) → `grobid_client.py` (PDF→TEI XML) → `tei_extract.py` (extract sections) → `chunking.py` (sliding window) → embeddings via Ollama (`embeddings.py`) → stored in both Qdrant (`qdrant_store.py`) and SQLite FTS5 (`sqlite_store.py`). Orchestrated by `IngestPipeline` in `ingest.py`.
+ArXiv API (`ingest/arxiv_client.py`) → GROBID (`ingest/grobid_client.py`) → TEI extraction (`ingest/tei_extract.py`) → chunking (`ingest/chunking.py`) → embeddings (`embeddings.py`) → storage (`storage/qdrant.py`, `storage/sqlite.py`). Orchestrated by `ingest/pdf_pipeline.py` and `ingest/service.py`.
 
 ### Hybrid Retrieval
-`retrieve.py` implements `HybridRetriever` that merges vector search (Qdrant, cosine) with keyword search (SQLite FTS5, BM25) using Reciprocal Rank Fusion (RRF). Applies per-document chunk quotas, section boosting, and deduplication by (arxiv_id, section_title, chunk_id).
+`retrieval/hybrid.py` implements `HybridRetriever` that merges vector search (Qdrant, cosine) with keyword search (SQLite FTS5, BM25) using Reciprocal Rank Fusion (RRF). Applies per-document chunk quotas, section boosting, and deduplication by `(arxiv_id, section_title, chunk_id)`.
 
 ### Relevance & Answer Safeguards
 - **Relevance guard**: Extracts rare query terms (5+ chars, digits); raises `NoRelevantSourcesError` if no term overlap and vector scores below threshold (`relevance_vector_threshold` in Settings, default 0.45).
-- **Answer routing**: `answer` uses a cheap prelim retrieval pass, then routes to `single|compare|survey|implement|evidence` via rules/LLM/hybrid (`routing.py`).
+- **Answer routing**: `answer` uses a cheap prelim retrieval pass, then routes to `single|compare|survey|implement|evidence` via rules/LLM/hybrid (`answer/routing.py`).
 - **Comparison guard**: Applied when routed mode is compare; refuses if fewer than 2 sources from each of the top 2 papers.
-- **Citation enforcement**: Generated answers must include `[S#]` citations; CLI runs validation + repair loop (`answer.py`, `prompts_answer.py`).
+- **Citation enforcement**: Generated answers must include `[S#]` citations; CLI/API share `answer/service.py` + `answer/citations.py`.
 
 ### Key Patterns
-- **HTTP retry**: All external HTTP calls use `http_retry.http_request_with_retry()` with exponential backoff. GROBID uses `prepare_kwargs` callback to re-open file handles per attempt.
-- **Exception hierarchy**: `exceptions.py` defines `CvRagError` base. Modules raise specific subclasses; CLI catches and converts to `typer.Exit`.
+- **HTTP retry**: External HTTP calls use `shared/http.py` with exponential backoff. GROBID uses `prepare_kwargs` callbacks to re-open file handles per attempt.
+- **Exception hierarchy**: `shared/errors.py` defines `CvRagError` base. Modules raise specific subclasses; CLI catches and converts to `typer.Exit`.
 - **Logging**: All service modules use `logging.getLogger(__name__)`. Enable with `cv-rag -v`.
 
 ## Configuration
 
-All settings in `config.py` via environment variables prefixed `CV_RAG_`. Key ones:
+All settings are in `shared/settings.py` via environment variables prefixed `CV_RAG_`. Key ones:
 - `CV_RAG_QDRANT_URL` (default: localhost:6333), `CV_RAG_GROBID_URL` (localhost:8070), `CV_RAG_OLLAMA_URL` (localhost:11434)
 - `CV_RAG_CHUNK_MAX_CHARS` (1200), `CV_RAG_CHUNK_OVERLAP` (200)
 - Storage paths: `CV_RAG_DATA_DIR`, `CV_RAG_PDF_DIR`, `CV_RAG_TEI_DIR`, `CV_RAG_METADATA_DIR`

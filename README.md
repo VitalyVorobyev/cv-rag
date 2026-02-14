@@ -33,6 +33,18 @@ A local-first Retrieval-Augmented Generation (RAG) system for computer-vision pa
 4. generate answer with MLX LLM
 5. validate citations (and repair if needed)
 
+**Code layout**
+
+* `cv_rag/shared/` settings, errors, HTTP retry helpers
+* `cv_rag/storage/` SQLite/Qdrant adapters
+* `cv_rag/ingest/` arXiv client, PDF/TEI/chunk pipeline, dedupe, ingest service
+* `cv_rag/retrieval/` hybrid retrieval + relevance filters
+* `cv_rag/answer/` routing, prompts, citation checks, answer service, MLX runner
+* `cv_rag/curation/` Semantic Scholar enrichment/tiering
+* `cv_rag/seeding/` awesome-list seeding + OpenAlex DOI resolution
+* `cv_rag/interfaces/cli/` Typer entrypoint + command handlers
+* `cv_rag/interfaces/api/` FastAPI app, routers, schemas
+
 ---
 
 ## Requirements
@@ -238,16 +250,16 @@ Use `--top-venues 0` to skip venue frequency output.
 
 ## Configuration
 
-Config lives in `cv_rag/config.py`. Typical knobs:
+Settings live in `cv_rag/shared/settings.py` (`CV_RAG_*` env vars). Typical knobs:
 
 * Service URLs:
 
-  * `QDRANT_URL` (default `http://localhost:6333`)
-  * `GROBID_URL` (default `http://localhost:8070`)
-  * `OLLAMA_URL` (default `http://localhost:11434`)
+  * `CV_RAG_QDRANT_URL` (default `http://localhost:6333`)
+  * `CV_RAG_GROBID_URL` (default `http://localhost:8070`)
+  * `CV_RAG_OLLAMA_URL` (default `http://localhost:11434`)
 * Paths under `./data/`:
 
-  * `data/pdfs/`, `data/tei/`, `data/metadata/`
+  * `CV_RAG_DATA_DIR`, `CV_RAG_PDF_DIR`, `CV_RAG_TEI_DIR`, `CV_RAG_METADATA_DIR`
 * Retrieval:
 
   * `--k`, `--max-per-doc`, `--section-boost`
@@ -333,7 +345,7 @@ uv run cv-rag serve --reload
 cd web && npm install && npm run dev   # http://localhost:5173
 ```
 
-Production build: `cd web && npm run build` (outputs to `cv_rag/api/static/`, served by FastAPI).
+Production build: `cd web && npm run build` (outputs to `cv_rag/interfaces/api/static/`, served by FastAPI).
 
 ---
 

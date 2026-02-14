@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from cv_rag.curate import CurateThresholds, compute_tier_and_score
+from cv_rag.curation.service import CurateThresholds, compute_tier_and_score
 
 
 def test_compute_tier_and_score_assigns_tier0_for_top_venue_and_high_citations() -> None:

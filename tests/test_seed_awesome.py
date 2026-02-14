@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from cv_rag.seed_awesome import (
+from cv_rag.seeding.awesome import (
     AwesomeDoiSeedRecord,
     AwesomeSeedRecord,
     extract_arxiv_matches,

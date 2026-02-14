@@ -1,7 +1,7 @@
 import itertools
 
-from cv_rag.chunking import chunk_sections
-from cv_rag.tei_extract import Section
+from cv_rag.ingest.chunking import chunk_sections
+from cv_rag.ingest.tei_extract import Section
 
 
 def test_chunk_boundaries_and_overlap() -> None:

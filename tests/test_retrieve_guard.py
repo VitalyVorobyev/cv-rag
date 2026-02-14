@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from cv_rag.retrieve import HybridRetriever, NoRelevantSourcesError, RetrievedChunk
+from cv_rag.retrieval.hybrid import HybridRetriever, NoRelevantSourcesError, RetrievedChunk
 
 
 class DummyEmbedder:

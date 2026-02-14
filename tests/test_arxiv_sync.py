@@ -1,4 +1,4 @@
-from cv_rag.arxiv_sync import (
+from cv_rag.ingest.arxiv_client import (
     PaperMetadata,
     _fetch_arxiv_id_feed,
     fetch_cs_cv_papers,
@@ -47,7 +47,7 @@ def test_fetch_papers_by_ids_falls_back_to_direct_urls(monkeypatch: object) -> N
     ) -> str:
         raise RuntimeError("simulated error")
 
-    monkeypatch.setattr("cv_rag.arxiv_sync._fetch_arxiv_id_feed", fail_fetch)
+    monkeypatch.setattr("cv_rag.ingest.arxiv_client._fetch_arxiv_id_feed", fail_fetch)
 
     papers = fetch_papers_by_ids(
         ids=["2104.00680", "1911.11763v2"],
@@ -82,8 +82,8 @@ def test_fetch_papers_by_ids_resolves_unversioned_to_latest_when_enabled(monkeyp
                 out.append(_paper(arxiv_id_with_version=f"{item}v3", title=f"title:{item}"))
         return out
 
-    monkeypatch.setattr("cv_rag.arxiv_sync._fetch_arxiv_id_feed", fake_fetch)
-    monkeypatch.setattr("cv_rag.arxiv_sync._parse_api_feed", fake_parse)
+    monkeypatch.setattr("cv_rag.ingest.arxiv_client._fetch_arxiv_id_feed", fake_fetch)
+    monkeypatch.setattr("cv_rag.ingest.arxiv_client._parse_api_feed", fake_parse)
 
     papers = fetch_papers_by_ids(
         ids=["2104.00680", "1911.11763v2"],
@@ -118,8 +118,8 @@ def test_fetch_papers_by_ids_keeps_unversioned_when_resolution_disabled(monkeypa
                 out.append(_paper(arxiv_id_with_version=f"{item}v3", title=f"title:{item}"))
         return out
 
-    monkeypatch.setattr("cv_rag.arxiv_sync._fetch_arxiv_id_feed", fake_fetch)
-    monkeypatch.setattr("cv_rag.arxiv_sync._parse_api_feed", fake_parse)
+    monkeypatch.setattr("cv_rag.ingest.arxiv_client._fetch_arxiv_id_feed", fake_fetch)
+    monkeypatch.setattr("cv_rag.ingest.arxiv_client._parse_api_feed", fake_parse)
 
     papers = fetch_papers_by_ids(
         ids=["2104.00680", "1911.11763v2"],
@@ -152,8 +152,8 @@ def test_fetch_papers_by_ids_batches_requests(monkeypatch: object) -> None:
         ids = [item for item in feed_text.split(",") if item]
         return [_paper(arxiv_id_with_version=item, title=f"title:{item}") for item in ids]
 
-    monkeypatch.setattr("cv_rag.arxiv_sync._fetch_arxiv_id_feed", fake_fetch)
-    monkeypatch.setattr("cv_rag.arxiv_sync._parse_api_feed", fake_parse)
+    monkeypatch.setattr("cv_rag.ingest.arxiv_client._fetch_arxiv_id_feed", fake_fetch)
+    monkeypatch.setattr("cv_rag.ingest.arxiv_client._parse_api_feed", fake_parse)
 
     papers = fetch_papers_by_ids(
         ids=["2104.00680", "1911.11763", "2201.00001", "2201.00002", "2201.00003"],
@@ -198,8 +198,8 @@ def test_fetch_papers_by_ids_keeps_partial_metadata_on_batch_failure(monkeypatch
         ids = [item for item in feed_text.split(",") if item]
         return [_paper(arxiv_id_with_version=item, title=f"title:{item}") for item in ids]
 
-    monkeypatch.setattr("cv_rag.arxiv_sync._fetch_arxiv_id_feed", fake_fetch)
-    monkeypatch.setattr("cv_rag.arxiv_sync._parse_api_feed", fake_parse)
+    monkeypatch.setattr("cv_rag.ingest.arxiv_client._fetch_arxiv_id_feed", fake_fetch)
+    monkeypatch.setattr("cv_rag.ingest.arxiv_client._parse_api_feed", fake_parse)
 
     papers = fetch_papers_by_ids(
         ids=["2104.00680", "1911.11763", "2301.00001"],
@@ -234,7 +234,7 @@ def test_fetch_arxiv_id_feed_requests_full_batch_size(monkeypatch: object) -> No
         captured_params.update(params)
         return DummyResponse()
 
-    monkeypatch.setattr("cv_rag.arxiv_sync.http_request_with_retry", fake_retry)
+    monkeypatch.setattr("cv_rag.ingest.arxiv_client.http_request_with_retry", fake_retry)
 
     feed_text = _fetch_arxiv_id_feed(
         arxiv_api_url="https://export.arxiv.org/api/query",
@@ -277,8 +277,8 @@ def test_fetch_cs_cv_papers_skips_exact_versions(monkeypatch: object) -> None:
             ]
         return []
 
-    monkeypatch.setattr("cv_rag.arxiv_sync._fetch_arxiv_api_feed", fake_fetch)
-    monkeypatch.setattr("cv_rag.arxiv_sync._parse_api_feed", fake_parse)
+    monkeypatch.setattr("cv_rag.ingest.arxiv_client._fetch_arxiv_api_feed", fake_fetch)
+    monkeypatch.setattr("cv_rag.ingest.arxiv_client._parse_api_feed", fake_parse)
 
     papers = fetch_cs_cv_papers(
         limit=3,
@@ -323,8 +323,8 @@ def test_fetch_cs_cv_papers_fills_limit_with_pagination(monkeypatch: object) -> 
             ]
         return []
 
-    monkeypatch.setattr("cv_rag.arxiv_sync._fetch_arxiv_api_feed", fake_fetch)
-    monkeypatch.setattr("cv_rag.arxiv_sync._parse_api_feed", fake_parse)
+    monkeypatch.setattr("cv_rag.ingest.arxiv_client._fetch_arxiv_api_feed", fake_fetch)
+    monkeypatch.setattr("cv_rag.ingest.arxiv_client._parse_api_feed", fake_parse)
 
     papers = fetch_cs_cv_papers(
         limit=3,
@@ -365,8 +365,8 @@ def test_fetch_cs_cv_papers_respects_scan_cap(monkeypatch: object) -> None:
             return [_paper("3000.00003v1"), _paper("3000.00004v1")]
         return [_paper("3000.00005v1")]
 
-    monkeypatch.setattr("cv_rag.arxiv_sync._fetch_arxiv_api_feed", fake_fetch)
-    monkeypatch.setattr("cv_rag.arxiv_sync._parse_api_feed", fake_parse)
+    monkeypatch.setattr("cv_rag.ingest.arxiv_client._fetch_arxiv_api_feed", fake_fetch)
+    monkeypatch.setattr("cv_rag.ingest.arxiv_client._parse_api_feed", fake_parse)
 
     papers = fetch_cs_cv_papers(
         limit=5,

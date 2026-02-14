@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.scripts]
-cv-rag = "cv_rag.cli:app"
+cv-rag = "cv_rag.interfaces.cli.app:app"
 
 [project.optional-dependencies]
 web = [

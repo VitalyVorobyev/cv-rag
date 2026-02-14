@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from cv_rag.openalex_resolve import extract_openalex_oa_fields
+from cv_rag.seeding.openalex import extract_openalex_oa_fields
 
 
 def test_extract_openalex_oa_fields_prefers_best_oa_location_pdf() -> None:

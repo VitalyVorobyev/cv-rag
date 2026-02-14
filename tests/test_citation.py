@@ -1,4 +1,4 @@
-from cv_rag.retrieve import format_citation
+from cv_rag.retrieval.hybrid import format_citation
 
 
 def test_format_citation() -> None:

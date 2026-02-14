@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import re
+from pathlib import Path
 
 from typer.testing import CliRunner
 
-import cv_rag.cli as cli_module
-from cv_rag.arxiv_sync import PaperMetadata
-from cv_rag.config import Settings
-from cv_rag.sqlite_store import SQLiteStore
+import cv_rag.interfaces.cli.app as cli_module
+from cv_rag.ingest.arxiv_client import PaperMetadata
+from cv_rag.shared.settings import Settings
+from cv_rag.storage.sqlite import SQLiteStore
 
 
 def _settings(tmp_path: Path) -> Settings:

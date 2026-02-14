@@ -4,15 +4,15 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-import cv_rag.cli as cli_module
-from cv_rag.answer import (
+import cv_rag.interfaces.cli.app as cli_module
+from cv_rag.answer.citations import (
     build_strict_answer_prompt,
     enforce_cross_doc_support,
     retrieve_for_answer,
     validate_answer_citations,
 )
-from cv_rag.config import Settings
-from cv_rag.retrieve import RetrievedChunk
+from cv_rag.retrieval.hybrid import RetrievedChunk
+from cv_rag.shared.settings import Settings
 
 
 def test_build_strict_answer_prompt_includes_sources_and_rules() -> None:

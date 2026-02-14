@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from cv_rag.retrieve import RetrievedChunk
-from cv_rag.routing import AnswerMode, route, rule_router
+from cv_rag.answer.routing import AnswerMode, route, rule_router
+from cv_rag.retrieval.hybrid import RetrievedChunk
 
 
 def _chunk(arxiv_id: str, idx: int, score: float = 0.8) -> RetrievedChunk:

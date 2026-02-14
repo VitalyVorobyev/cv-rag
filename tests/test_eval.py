@@ -4,9 +4,9 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-import cv_rag.cli as cli_module
-from cv_rag.config import Settings
-from cv_rag.retrieve import RetrievedChunk
+import cv_rag.interfaces.cli.app as cli_module
+from cv_rag.retrieval.hybrid import RetrievedChunk
+from cv_rag.shared.settings import Settings
 
 
 def _settings(tmp_path: Path) -> Settings:

@@ -5,9 +5,9 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-import cv_rag.cli as cli_module
-from cv_rag.arxiv_sync import PaperMetadata
-from cv_rag.config import Settings
+import cv_rag.interfaces.cli.app as cli_module
+from cv_rag.ingest.arxiv_client import PaperMetadata
+from cv_rag.shared.settings import Settings
 
 
 def _paper(arxiv_id_with_version: str, title: str = "Paper") -> PaperMetadata:
