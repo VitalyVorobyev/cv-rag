@@ -410,7 +410,7 @@ def test_answer_non_comparison_skips_cross_doc_warning(
     assert "Refusing to answer comparison" not in result.output
 
 
-def test_answer_refuses_comparison_when_top_doc_coverage_insufficient(
+def test_answer_refuses_comparison_when_top_doc_coverage_insufficient_in_forced_compare_mode(
     monkeypatch: object, tmp_path: Path
 ) -> None:
     runner = CliRunner()
@@ -483,6 +483,8 @@ def test_answer_refuses_comparison_when_top_doc_coverage_insufficient(
         [
             "answer",
             "Compare LoFTR and SuperGlue",
+            "--mode",
+            "compare",
             "--k",
             "8",
             "--model",

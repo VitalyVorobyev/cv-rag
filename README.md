@@ -58,6 +58,7 @@ uv pip install -e .
 ### 2) Start Qdrant (Docker)
 
 ```bash
+colima start --cpu 6 --memory 12 --disk 80
 docker compose up qdrant
 ```
 

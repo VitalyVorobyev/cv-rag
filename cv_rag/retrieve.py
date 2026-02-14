@@ -26,7 +26,7 @@ class RetrievedChunk:
 QUERY_TOKEN_RE = re.compile(r"[a-z0-9]+")
 QUESTION_ALNUM_RE = re.compile(r"[A-Za-z0-9]+")
 SECTION_PRIORITY_RE = re.compile(
-    r"(method|approach|supervision|loss|training|optimal matching)",
+    r"(method|approach|implementation|supervision|loss|training|optimal matching|experiments?|ablation|results?)",
     re.IGNORECASE,
 )
 ENTITY_TOKEN_WHITELIST = {"loftr", "superglue"}

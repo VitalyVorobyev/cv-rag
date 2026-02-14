@@ -14,10 +14,8 @@ from rich.table import Table
 
 from cv_rag.answer import (
     build_query_prompt,
-    build_repair_prompt,
     build_strict_answer_prompt,
     enforce_cross_doc_support,
-    is_comparison_question,
     retrieve_for_answer,
     validate_answer_citations,
 )
@@ -32,12 +30,27 @@ from cv_rag.embeddings import OllamaEmbedClient
 from cv_rag.exceptions import GenerationError
 from cv_rag.ingest import IngestPipeline
 from cv_rag.llm import mlx_generate
+from cv_rag.prompts_answer import (
+    build_prompt as build_mode_answer_prompt,
+)
+from cv_rag.prompts_answer import (
+    build_repair_prompt as build_mode_repair_prompt,
+)
 from cv_rag.qdrant_store import QdrantStore, VectorPoint
 from cv_rag.retrieve import (
     HybridRetriever,
     RetrievedChunk,
     extract_entity_like_tokens,
     format_citation,
+)
+from cv_rag.routing import (
+    AnswerMode,
+    RouteDecision,
+    make_route_decision,
+    mode_from_value,
+)
+from cv_rag.routing import (
+    route as route_answer_mode,
 )
 from cv_rag.s2_client import SemanticScholarClient
 from cv_rag.seed_awesome import seed_awesome_sources
@@ -506,16 +519,20 @@ def query(
 @app.command()
 def answer(
     question: str = typer.Argument(..., help="Question to answer from local index."),
-    k: int = typer.Option(12, "--k", help="Number of sources to include after retrieval merge."),
+    k: int | None = typer.Option(
+        None,
+        "--k",
+        help="Override number of sources after routing (default depends on selected mode).",
+    ),
     model: str = typer.Option(..., "--model", help="MLX model ID, local path, or HF repo."),
     max_tokens: int = typer.Option(600, "--max-tokens", help="Maximum tokens to generate."),
     temperature: float = typer.Option(0.2, "--temperature", help="Sampling temperature."),
     top_p: float = typer.Option(0.9, "--top-p", help="Sampling top-p."),
     seed: int | None = typer.Option(None, "--seed", help="Optional random seed."),
-    max_per_doc: int = typer.Option(
-        4,
+    max_per_doc: int | None = typer.Option(
+        None,
         "--max-per-doc",
-        help="Maximum number of chunks to keep per paper.",
+        help="Override per-paper chunk cap after routing (default depends on selected mode).",
     ),
     section_boost: float = typer.Option(
         0.05,
@@ -531,6 +548,26 @@ def answer(
         False,
         "--no-refuse",
         help="If citation validation still fails after repair, print the draft with a warning instead of exiting.",
+    ),
+    mode: str = typer.Option(
+        "auto",
+        "--mode",
+        help="Answer mode: auto|single|compare|survey|implement|evidence.",
+    ),
+    router_model: str | None = typer.Option(
+        None,
+        "--router-model",
+        help="Optional model for routing. Defaults to --model.",
+    ),
+    router_strategy: str = typer.Option(
+        "hybrid",
+        "--router-strategy",
+        help="Routing strategy: rules|llm|hybrid.",
+    ),
+    router_top_k: int = typer.Option(
+        12,
+        "--router-top-k",
+        help="Cheap retrieval top-k used for mode routing.",
     ),
 ) -> None:
     settings = get_settings()
@@ -553,47 +590,109 @@ def answer(
         sqlite_store=sqlite_store,
     )
 
+    mode_value = mode.strip().casefold()
+    if mode_value not in {"auto", "single", "compare", "survey", "implement", "evidence"}:
+        console.print("[red]Invalid --mode. Use: auto|single|compare|survey|implement|evidence[/red]")
+        raise typer.Exit(code=1)
+
+    router_strategy_value = router_strategy.strip().casefold()
+    if router_strategy_value not in {"rules", "llm", "hybrid"}:
+        console.print("[red]Invalid --router-strategy. Use: rules|llm|hybrid[/red]")
+        raise typer.Exit(code=1)
+    if router_top_k <= 0:
+        console.print("[red]--router-top-k must be > 0[/red]")
+        raise typer.Exit(code=1)
+
+    router_model_id = router_model or model
     entity_tokens = extract_entity_like_tokens(question)
+    decision: RouteDecision
+    prelim_chunks: list[RetrievedChunk]
+    maybe_relevant: list[RetrievedChunk]
+    final_k = k if k is not None else 8
+    final_max_per_doc = max_per_doc if max_per_doc is not None else 4
     try:
-        chunks, maybe_relevant = retrieve_for_answer(
+        prelim_chunks, maybe_relevant = retrieve_for_answer(
             retriever=retriever,
             question=question,
-            k=k,
-            max_per_doc=max_per_doc,
+            k=router_top_k,
+            max_per_doc=2,
             section_boost=section_boost,
+            entity_tokens=entity_tokens,
+        )
+
+        if entity_tokens and 0 < len(prelim_chunks) < router_top_k:
+            console.print(f"[yellow]Only {len(prelim_chunks)} relevant sources found.[/yellow]")
+
+        if retriever._is_irrelevant_result(
+            question,
+            prelim_chunks[: max(3, len(prelim_chunks))],
+            settings.relevance_vector_threshold,
+        ):
+            console.print("Not found in indexed corpus. Try: cv-rag ingest-ids 2104.00680 1911.11763")
+            if maybe_relevant:
+                table = Table(title="Maybe Relevant (Top 3)")
+                table.add_column("Rank", justify="right")
+                table.add_column("Citation")
+                table.add_column("Preview")
+                for idx, chunk in enumerate(maybe_relevant, start=1):
+                    citation = format_citation(chunk.arxiv_id, chunk.section_title)
+                    preview = chunk.text[:160].replace("\n", " ")
+                    table.add_row(str(idx), citation, preview)
+                console.print(table)
+            raise typer.Exit(code=1)
+
+        if not prelim_chunks:
+            console.print("[red]No sources retrieved for this question. Run ingest first or broaden the query.[/red]")
+            raise typer.Exit(code=1)
+
+        if mode_value == "auto":
+            decision = route_answer_mode(
+                question=question,
+                prelim_chunks=prelim_chunks,
+                model_id=router_model_id,
+                strategy=router_strategy_value,
+            )
+        else:
+            forced_mode = mode_from_value(mode_value)
+            decision = make_route_decision(
+                forced_mode,
+                notes=f"Manual mode override: {forced_mode.value}.",
+                confidence=1.0,
+            )
+
+        final_k = k if k is not None else decision.k
+        final_max_per_doc = max_per_doc if max_per_doc is not None else decision.max_per_doc
+        effective_section_boost = max(section_boost, decision.section_boost_hint)
+
+        chunks, _ = retrieve_for_answer(
+            retriever=retriever,
+            question=question,
+            k=final_k,
+            max_per_doc=final_max_per_doc,
+            section_boost=effective_section_boost,
             entity_tokens=entity_tokens,
         )
     finally:
         sqlite_store.close()
 
-    if entity_tokens and 0 < len(chunks) < k:
+    if entity_tokens and 0 < len(chunks) < final_k:
         console.print(f"[yellow]Only {len(chunks)} relevant sources found.[/yellow]")
-
-    if retriever._is_irrelevant_result(question, chunks[: max(3, len(chunks))], settings.relevance_vector_threshold):
-        console.print("Not found in indexed corpus. Try: cv-rag ingest-ids 2104.00680 1911.11763")
-        if maybe_relevant:
-            table = Table(title="Maybe Relevant (Top 3)")
-            table.add_column("Rank", justify="right")
-            table.add_column("Citation")
-            table.add_column("Preview")
-            for idx, chunk in enumerate(maybe_relevant, start=1):
-                citation = format_citation(chunk.arxiv_id, chunk.section_title)
-                preview = chunk.text[:160].replace("\n", " ")
-                table.add_row(str(idx), citation, preview)
-            console.print(table)
-        raise typer.Exit(code=1)
 
     if not chunks:
         console.print("[red]No sources retrieved for this question. Run ingest first or broaden the query.[/red]")
         raise typer.Exit(code=1)
 
-    cross_doc_decision = enforce_cross_doc_support(question, chunks)
-    chunks = cross_doc_decision.filtered_chunks
-    for warning in cross_doc_decision.warnings:
-        console.print(f"[yellow]{warning}[/yellow]")
-    if cross_doc_decision.should_refuse and is_comparison_question(question):
-        console.print("[red]Refusing to answer comparison without sufficient cross-paper coverage.[/red]")
-        raise typer.Exit(code=1)
+    if decision.mode is AnswerMode.COMPARE:
+        cross_doc_decision = enforce_cross_doc_support(question, chunks)
+        chunks = cross_doc_decision.filtered_chunks
+        for warning in cross_doc_decision.warnings:
+            console.print(f"[yellow]{warning}[/yellow]")
+        if cross_doc_decision.should_refuse:
+            console.print("[red]Refusing to answer comparison without sufficient cross-paper coverage.[/red]")
+            raise typer.Exit(code=1)
+
+    if decision.preface:
+        console.print(f"[yellow]{decision.preface}[/yellow]")
 
     if show_sources:
         table = Table(title="Retrieved Sources")
@@ -608,7 +707,12 @@ def answer(
             table.add_row(f"S{idx}", chunk.arxiv_id, chunk.title, section, preview)
         console.print(table)
 
-    prompt = build_strict_answer_prompt(question, chunks)
+    prompt = build_mode_answer_prompt(
+        decision.mode,
+        question,
+        chunks,
+        route_preface=decision.preface,
+    )
     draft_text = _mlx_generate_or_exit(
         model=model,
         prompt=prompt,
@@ -622,7 +726,13 @@ def answer(
     answer_text = draft_text
     if not valid:
         console.print("[yellow]Draft failed citation check; attempting repair…[/yellow]")
-        repair_prompt = build_repair_prompt(question, chunks, draft_text)
+        repair_prompt = build_mode_repair_prompt(
+            decision.mode,
+            question,
+            chunks,
+            draft_text,
+            route_preface=decision.preface,
+        )
         answer_text = _mlx_generate_or_exit(
             model=model,
             prompt=repair_prompt,
