@@ -30,6 +30,11 @@ SECTION_PRIORITY_RE = re.compile(
     re.IGNORECASE,
 )
 ENTITY_TOKEN_WHITELIST = {"loftr", "superglue"}
+TIER_SCORE_BOOSTS = {
+    0: 0.25,
+    1: 0.10,
+    2: 0.0,
+}
 COMMON_QUERY_TERMS = {
     "about",
     "against",
@@ -149,6 +154,13 @@ class HybridRetriever:
             for item in by_id.values():
                 if self._matches_priority_section(item):
                     item.fused_score += section_boost
+
+        if by_id and hasattr(self.sqlite_store, "get_paper_tiers"):
+            tiers_by_arxiv = self.sqlite_store.get_paper_tiers(
+                sorted({chunk.arxiv_id for chunk in by_id.values()})
+            )
+            for item in by_id.values():
+                item.fused_score += TIER_SCORE_BOOSTS.get(tiers_by_arxiv.get(item.arxiv_id, 2), 0.0)
 
         ranked = sorted(by_id.values(), key=lambda item: item.fused_score, reverse=True)
         deduped = self._dedupe_ranked_chunks(ranked)

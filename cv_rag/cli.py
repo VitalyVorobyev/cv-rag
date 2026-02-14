@@ -27,6 +27,7 @@ from cv_rag.arxiv_sync import (
     fetch_papers_by_ids,
 )
 from cv_rag.config import get_settings
+from cv_rag.curate import CurateOptions, CurateThresholds, curate_corpus, load_venue_whitelist
 from cv_rag.embeddings import OllamaEmbedClient
 from cv_rag.exceptions import GenerationError
 from cv_rag.ingest import IngestPipeline
@@ -38,6 +39,7 @@ from cv_rag.retrieve import (
     extract_entity_like_tokens,
     format_citation,
 )
+from cv_rag.s2_client import SemanticScholarClient
 from cv_rag.sqlite_store import SQLiteStore
 
 logger = logging.getLogger(__name__)
@@ -52,6 +54,8 @@ def _main_callback(
 ) -> None:
     level = logging.DEBUG if verbose else logging.WARNING
     logging.basicConfig(level=level, format="%(name)s %(levelname)s: %(message)s")
+
+
 class EvalCase(BaseModel):
     question: str
     must_include_arxiv_ids: list[str] = Field(default_factory=list)
@@ -284,6 +288,100 @@ def ingest_ids(
         force_grobid=force_grobid,
         embed_batch_size=embed_batch_size,
     )
+
+
+@app.command()
+def curate(
+    refresh_days: int = typer.Option(
+        30,
+        "--refresh-days",
+        help="Refresh metrics older than this many days.",
+    ),
+    tier0_venues: Path = typer.Option(
+        Path("data/venues_tier0.txt"),
+        "--tier0-venues",
+        help="Path to tier-0 venue list (txt or yaml).",
+    ),
+    tier0_min_citations: int = typer.Option(
+        200,
+        "--tier0-min-citations",
+        help="Tier-0 minimum citation count threshold.",
+    ),
+    tier0_min_cpy: float = typer.Option(
+        30.0,
+        "--tier0-min-cpy",
+        help="Tier-0 minimum citations-per-year threshold.",
+    ),
+    tier1_min_citations: int = typer.Option(
+        20,
+        "--tier1-min-citations",
+        help="Tier-1 minimum citation count threshold.",
+    ),
+    tier1_min_cpy: float = typer.Option(
+        3.0,
+        "--tier1-min-cpy",
+        help="Tier-1 minimum citations-per-year threshold.",
+    ),
+    limit: int | None = typer.Option(
+        None,
+        "--limit",
+        help="Only enrich first N arXiv IDs from the local paper index.",
+    ),
+) -> None:
+    settings = get_settings()
+    sqlite_store = SQLiteStore(settings.sqlite_path)
+    sqlite_store.create_schema()
+
+    try:
+        try:
+            tier0_whitelist = load_venue_whitelist(tier0_venues)
+        except ValueError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(code=1) from None
+
+        thresholds = CurateThresholds(
+            tier0_min_citations=tier0_min_citations,
+            tier0_min_cpy=tier0_min_cpy,
+            tier1_min_citations=tier1_min_citations,
+            tier1_min_cpy=tier1_min_cpy,
+        )
+        options = CurateOptions(
+            refresh_days=refresh_days,
+            limit=limit,
+            thresholds=thresholds,
+        )
+        s2_client = SemanticScholarClient(
+            timeout_seconds=settings.http_timeout_seconds,
+            user_agent=settings.user_agent,
+            max_retries=settings.arxiv_max_retries,
+            backoff_start_seconds=settings.arxiv_backoff_start_seconds,
+            backoff_cap_seconds=settings.arxiv_backoff_cap_seconds,
+        )
+
+        def on_progress(done: int, total: int, arxiv_id: str, status: str) -> None:
+            console.print(f"[{done}/{total}] {arxiv_id} {status}")
+
+        console.print("[bold]Curating corpus with Semantic Scholar metadata...[/bold]")
+        console.print(f"Tier-0 venue whitelist size: {len(tier0_whitelist)}")
+        result = curate_corpus(
+            sqlite_store=sqlite_store,
+            s2_client=s2_client,
+            venue_whitelist=tier0_whitelist,
+            options=options,
+            progress_callback=on_progress,
+        )
+    finally:
+        sqlite_store.close()
+
+    tier_counts = ", ".join(
+        f"tier{tier}:{count}" for tier, count in sorted(result.tier_distribution.items())
+    ) or "none"
+    console.print("\n[bold green]Curation complete[/bold green]")
+    console.print(f"Candidates: {result.total_ids}")
+    console.print(f"Refreshed candidates: {result.to_refresh}")
+    console.print(f"Updated: {result.updated}")
+    console.print(f"Skipped: {result.skipped}")
+    console.print(f"Tier distribution: {tier_counts}")
 
 
 @app.command()

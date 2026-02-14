@@ -59,6 +59,21 @@ class SQLiteStore:
                 section_title,
                 text
             );
+
+            CREATE TABLE IF NOT EXISTS paper_metrics (
+                arxiv_id TEXT PRIMARY KEY,
+                citation_count INTEGER,
+                year INTEGER,
+                venue TEXT,
+                publication_types TEXT,
+                is_peer_reviewed INTEGER,
+                score REAL,
+                tier INTEGER,
+                updated_at INTEGER,
+                FOREIGN KEY (arxiv_id) REFERENCES papers(arxiv_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_paper_metrics_tier ON paper_metrics(tier);
             """
         )
         self.conn.commit()
@@ -160,6 +175,108 @@ class SQLiteStore:
             for row in rows
             if str(row["arxiv_id_with_version"]).strip()
         }
+
+    def list_paper_arxiv_ids(self, limit: int | None = None) -> list[str]:
+        sql = "SELECT arxiv_id FROM papers ORDER BY arxiv_id ASC"
+        params: tuple[object, ...]
+        if limit is None:
+            params = ()
+        else:
+            sql = f"{sql} LIMIT ?"
+            params = (limit,)
+        rows = self.conn.execute(sql, params).fetchall()
+        return [str(row["arxiv_id"]) for row in rows]
+
+    def get_paper_metric_timestamps(self, arxiv_ids: list[str]) -> dict[str, int]:
+        if not arxiv_ids:
+            return {}
+        placeholders = ", ".join("?" for _ in arxiv_ids)
+        rows = self.conn.execute(
+            f"""
+            SELECT arxiv_id, updated_at
+            FROM paper_metrics
+            WHERE arxiv_id IN ({placeholders})
+            """,
+            tuple(arxiv_ids),
+        ).fetchall()
+        out: dict[str, int] = {}
+        for row in rows:
+            updated_at = row["updated_at"]
+            if updated_at is None:
+                continue
+            out[str(row["arxiv_id"])] = int(updated_at)
+        return out
+
+    def upsert_paper_metrics(self, metric_rows: list[dict[str, Any]]) -> None:
+        if not metric_rows:
+            return
+        self.conn.executemany(
+            """
+            INSERT INTO paper_metrics (
+                arxiv_id,
+                citation_count,
+                year,
+                venue,
+                publication_types,
+                is_peer_reviewed,
+                score,
+                tier,
+                updated_at
+            )
+            VALUES (
+                :arxiv_id,
+                :citation_count,
+                :year,
+                :venue,
+                :publication_types,
+                :is_peer_reviewed,
+                :score,
+                :tier,
+                :updated_at
+            )
+            ON CONFLICT(arxiv_id) DO UPDATE SET
+                citation_count=excluded.citation_count,
+                year=excluded.year,
+                venue=excluded.venue,
+                publication_types=excluded.publication_types,
+                is_peer_reviewed=excluded.is_peer_reviewed,
+                score=excluded.score,
+                tier=excluded.tier,
+                updated_at=excluded.updated_at
+            """,
+            metric_rows,
+        )
+        self.conn.commit()
+
+    def get_paper_tiers(self, arxiv_ids: list[str]) -> dict[str, int]:
+        if not arxiv_ids:
+            return {}
+        placeholders = ", ".join("?" for _ in arxiv_ids)
+        rows = self.conn.execute(
+            f"""
+            SELECT arxiv_id, tier
+            FROM paper_metrics
+            WHERE arxiv_id IN ({placeholders})
+            """,
+            tuple(arxiv_ids),
+        ).fetchall()
+        out: dict[str, int] = {}
+        for row in rows:
+            tier = row["tier"]
+            if tier is None:
+                continue
+            out[str(row["arxiv_id"])] = int(tier)
+        return out
+
+    def get_paper_metrics_tier_distribution(self) -> dict[int, int]:
+        rows = self.conn.execute(
+            """
+            SELECT tier, COUNT(*) AS count
+            FROM paper_metrics
+            GROUP BY tier
+            """
+        ).fetchall()
+        return {int(row["tier"]): int(row["count"]) for row in rows if row["tier"] is not None}
 
     def keyword_search(self, query: str, limit: int) -> list[dict[str, Any]]:
         terms = TOKEN_RE.findall(query)

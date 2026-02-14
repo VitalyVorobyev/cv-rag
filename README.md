@@ -133,6 +133,14 @@ uv run cv-rag answer \
   --show-sources
 ```
 
+### Curate corpus tiers (Semantic Scholar metadata)
+
+```bash
+uv run cv-rag curate \
+  --refresh-days 30 \
+  --tier0-venues data/venues_tier0.txt
+```
+
 ### Run evaluation suite
 
 ```bash
@@ -168,6 +176,7 @@ data/
   pdfs/       # downloaded arXiv PDFs
   tei/        # GROBID TEI XML outputs
   metadata/   # arXiv metadata snapshots
+  venues_tier0.txt  # whitelist for top-tier venue bonus/tiering
 qdrant_storage/  # Qdrant persistent volume
 ```
 

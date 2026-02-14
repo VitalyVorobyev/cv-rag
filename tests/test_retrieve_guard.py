@@ -21,9 +21,13 @@ class DummyQdrantStore:
 class DummySQLiteStore:
     def __init__(self, hits: list[dict[str, object]]) -> None:
         self.hits = hits
+        self.tiers: dict[str, int] = {}
 
     def keyword_search(self, query: str, limit: int) -> list[dict[str, object]]:
         return self.hits[:limit]
+
+    def get_paper_tiers(self, arxiv_ids: list[str]) -> dict[str, int]:
+        return {arxiv_id: self.tiers[arxiv_id] for arxiv_id in arxiv_ids if arxiv_id in self.tiers}
 
 
 def test_retrieve_raises_when_query_terms_not_covered_and_scores_low() -> None:
@@ -189,3 +193,38 @@ def test_max_chunks_per_doc_quota_is_enforced() -> None:
         counts[chunk.arxiv_id] = counts.get(chunk.arxiv_id, 0) + 1
 
     assert counts["2000.00001"] == 2
+
+
+def test_tier_boost_promotes_tier0_paper() -> None:
+    qdrant_hits = [
+        {
+            "chunk_id": "a:0",
+            "arxiv_id": "1000.00001",
+            "title": "Paper A",
+            "section_title": "Introduction",
+            "text": "General overview",
+            "score": 0.95,
+        },
+        {
+            "chunk_id": "b:0",
+            "arxiv_id": "1000.00002",
+            "title": "Paper B",
+            "section_title": "Introduction",
+            "text": "General overview",
+            "score": 0.94,
+        },
+    ]
+    sqlite_store = DummySQLiteStore([])
+    sqlite_store.tiers = {
+        "1000.00001": 2,
+        "1000.00002": 0,
+    }
+
+    retriever = HybridRetriever(
+        embedder=DummyEmbedder(),
+        qdrant_store=DummyQdrantStore(qdrant_hits),
+        sqlite_store=sqlite_store,
+    )
+
+    chunks = retriever.retrieve(query="overview", top_k=2, vector_k=2, keyword_k=0)
+    assert chunks[0].arxiv_id == "1000.00002"
