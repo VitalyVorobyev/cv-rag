@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-import subprocess
 
 from typer.testing import CliRunner
 
 import cv_rag.cli as cli_module
+from cv_rag.answer import build_strict_answer_prompt, retrieve_for_answer, validate_answer_citations
 from cv_rag.config import Settings
-from cv_rag.retrieve import RetrievedChunk, build_strict_answer_prompt
+from cv_rag.retrieve import RetrievedChunk
 
 
 def test_build_strict_answer_prompt_includes_sources_and_rules() -> None:
@@ -47,14 +47,14 @@ def test_validate_answer_citations_rejects_uncited_paragraph() -> None:
         "LoFTR uses dense matching with coarse-to-fine refinement.\n\n"
         "SuperGlue uses graph neural network context [S1]."
     )
-    valid, reason = cli_module._validate_answer_citations(answer, source_count=3)
+    valid, reason = validate_answer_citations(answer, source_count=3)
     assert not valid
-    assert "Paragraph 1 has no inline [S#] citation." == reason
+    assert reason == "Paragraph 1 has no inline [S#] citation."
 
 
 def test_validate_answer_citations_rejects_out_of_range_citation() -> None:
     answer = "This claim cites a non-existent source [S9]."
-    valid, reason = cli_module._validate_answer_citations(answer, source_count=3)
+    valid, reason = validate_answer_citations(answer, source_count=3)
     assert not valid
     assert "outside S1..S3" in reason
 
@@ -99,7 +99,7 @@ def test_retrieve_for_answer_does_not_backfill_after_entity_filter() -> None:
                 ),
             ]
 
-    chunks, _ = cli_module._retrieve_for_answer(
+    chunks, _ = retrieve_for_answer(
         retriever=DummyRetriever(),  # type: ignore[arg-type]
         question="Explain LoFTR",
         k=8,
@@ -295,15 +295,13 @@ def test_answer_refuses_comparison_when_top_doc_coverage_insufficient(
             ),
         ]
 
-    def fail_run(
-        cmd: list[str], check: bool, capture_output: bool, text: bool
-    ) -> subprocess.CompletedProcess[str]:
+    def fail_generate(**kwargs: object) -> str:
         raise AssertionError("LLM should not be called for insufficient comparison coverage")
 
     monkeypatch.setattr(cli_module, "get_settings", lambda: settings)
     monkeypatch.setattr(cli_module, "QdrantStore", DummyQdrantStore)
     monkeypatch.setattr(cli_module.HybridRetriever, "retrieve", fake_retrieve)
-    monkeypatch.setattr(cli_module.subprocess, "run", fail_run)
+    monkeypatch.setattr(cli_module, "mlx_generate", fail_generate)
 
     result = runner.invoke(
         cli_module.app,
@@ -388,25 +386,18 @@ def test_answer_reprompts_when_citations_missing(monkeypatch: object, tmp_path: 
             ),
         ]
 
-    calls: list[list[str]] = []
+    calls: list[dict[str, object]] = []
 
-    def fake_run(
-        cmd: list[str], check: bool, capture_output: bool, text: bool
-    ) -> subprocess.CompletedProcess[str]:
-        calls.append(cmd)
+    def fake_generate(**kwargs: object) -> str:
+        calls.append(kwargs)
         if len(calls) == 1:
-            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="Draft answer no citations", stderr="")
-        return subprocess.CompletedProcess(
-            args=cmd,
-            returncode=0,
-            stdout="Revised answer [S1][S2][S3][S4][S1][S2]",
-            stderr="",
-        )
+            return "Draft answer no citations"
+        return "Revised answer [S1][S2][S3][S4][S1][S2]"
 
     monkeypatch.setattr(cli_module, "get_settings", lambda: settings)
     monkeypatch.setattr(cli_module, "QdrantStore", DummyQdrantStore)
     monkeypatch.setattr(cli_module.HybridRetriever, "retrieve", fake_retrieve)
-    monkeypatch.setattr(cli_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(cli_module, "mlx_generate", fake_generate)
 
     result = runner.invoke(
         cli_module.app,
@@ -424,10 +415,10 @@ def test_answer_reprompts_when_citations_missing(monkeypatch: object, tmp_path: 
     assert "Draft failed citation check; attempting repair" in result.output
     assert "Revised answer [S1][S2][S3][S4][S1][S2]" in result.output
     assert len(calls) == 2
-    prompt_index = calls[1].index("--prompt") + 1
-    assert "Draft to rewrite:" in calls[1][prompt_index]
-    assert "Draft answer no citations" in calls[1][prompt_index]
+    repair_prompt = str(calls[1]["prompt"])
+    assert "Draft to rewrite:" in repair_prompt
+    assert "Draft answer no citations" in repair_prompt
     assert (
         "Rewrite the draft. Add inline [S#] citations to every paragraph and every non-trivial claim. "
         "Remove any claim not supported by sources."
-    ) in calls[1][prompt_index]
+    ) in repair_prompt

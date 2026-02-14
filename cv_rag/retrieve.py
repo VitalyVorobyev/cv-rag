@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import re
+from dataclasses import dataclass, field
 from typing import Any
 
 from cv_rag.embeddings import OllamaEmbedClient
+from cv_rag.exceptions import RetrievalError
 from cv_rag.qdrant_store import QdrantStore
 from cv_rag.sqlite_store import SQLiteStore
 
@@ -60,7 +61,7 @@ COMMON_QUERY_TERMS = {
 }
 
 
-class NoRelevantSourcesError(RuntimeError):
+class NoRelevantSourcesError(RetrievalError):
     def __init__(self, candidates: list[RetrievedChunk]) -> None:
         super().__init__("no relevant sources")
         self.candidates = candidates
@@ -268,69 +269,3 @@ class HybridRetriever:
             default=-1.0,
         )
         return (not overlap_found) and (max_vector < vector_score_threshold)
-
-
-def build_query_prompt(query: str, chunks: list[RetrievedChunk]) -> str:
-    lines: list[str] = []
-    lines.append("You are answering a computer vision research question using paper excerpts.")
-    lines.append("Use only the provided context. If context is insufficient, say so.")
-    lines.append("Cite claims with inline citations in this format: arXiv:ID §Section.")
-    lines.append("")
-    lines.append(f"Question: {query}")
-    lines.append("")
-    lines.append("Context:")
-
-    for idx, chunk in enumerate(chunks, start=1):
-        citation = format_citation(chunk.arxiv_id, chunk.section_title)
-        lines.append(f"[{idx}] {citation}")
-        lines.append(chunk.text)
-        lines.append("")
-
-    lines.append("Answer:")
-    return "\n".join(lines)
-
-
-def build_strict_answer_prompt(question: str, chunks: list[RetrievedChunk]) -> str:
-    lines: list[str] = []
-    lines.append("You are a careful computer vision research assistant.")
-    lines.append("")
-    lines.append("Question:")
-    lines.append(question)
-    lines.append("")
-    lines.append("Sources:")
-
-    for idx, chunk in enumerate(chunks, start=1):
-        section = chunk.section_title.strip() or "Untitled"
-        snippet = " ".join(chunk.text.split())
-        lines.append(f"[S{idx}]")
-        lines.append(f"arxiv_id: {chunk.arxiv_id}")
-        lines.append(f"title: {chunk.title}")
-        lines.append(f"section: {section}")
-        lines.append(f"text: {snippet}")
-        lines.append("")
-
-    lines.append("Rules:")
-    lines.append("1. Only use information supported by the sources.")
-    lines.append("2. Every sentence must include one or more inline citations like [S3] or [S3][S7].")
-    lines.append("3. Every paragraph must include at least one inline citation [S#].")
-    lines.append("4. The first paragraph must end with at least one citation.")
-    lines.append("5. If sources are insufficient, state what is missing and ask one clarifying question.")
-    lines.append("6. Prefer comparisons and what each paper claims or shows.")
-    lines.append("7. Never cite a source outside S1..Sk. Never cite unrelated sources.")
-    lines.append("8. Do not add a separate 'Citations' footer.")
-    lines.append("9. Do not fabricate details, metrics, or citations.")
-    lines.append("10. Use paper-accurate terminology.")
-    lines.append("")
-    lines.append("Output format (MANDATORY):")
-    lines.append("Write EXACTLY 4 paragraphs labeled P1..P4, no headings, no bullet lists.")
-    lines.append("Each paragraph must have 2 sentences.")
-    lines.append("EVERY sentence must end with one or more citations like [S1] or [S1][S2].")
-    lines.append("Do not output any text before P1.")
-    lines.append("")
-    lines.append("Template (follow exactly):")
-    lines.append("P1: <2 sentences> [S#]")
-    lines.append("P2: <2 sentences> [S#]")
-    lines.append("P3: <2 sentences> [S#]")
-    lines.append("P4: <2 sentences> [S#]")
-    lines.append("Answer:")
-    return "\n".join(lines)

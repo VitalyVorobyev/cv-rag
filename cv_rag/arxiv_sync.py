@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import re
-import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -11,6 +10,7 @@ import feedparser
 import httpx
 from pydantic import BaseModel
 
+from cv_rag.http_retry import http_request_with_retry
 
 ARXIV_VERSION_RE = re.compile(r"v\d+$")
 ARXIV_RSS_URL = "https://export.arxiv.org/rss/cs.CV"
@@ -85,16 +85,6 @@ def _choose_pdf_url(entry: Any) -> str:
     return entry_id
 
 
-def _parse_retry_after_seconds(value: str | None) -> float | None:
-    if not value:
-        return None
-    try:
-        seconds = float(value)
-    except ValueError:
-        return None
-    return max(seconds, 0.0)
-
-
 def _clean_rss_summary(summary: str) -> str:
     compact = " ".join(summary.split())
     marker = "Abstract:"
@@ -135,35 +125,17 @@ def _fetch_arxiv_api_feed(
         "max_results": max_results,
     }
     headers = {"User-Agent": user_agent}
-    attempts = max(1, max_retries)
-    delay = max(backoff_start_seconds, 0.0)
 
     with httpx.Client(timeout=timeout_seconds, headers=headers, follow_redirects=True) as client:
-        for attempt in range(1, attempts + 1):
-            try:
-                response = client.get(arxiv_api_url, params=params)
-            except httpx.HTTPError as exc:
-                if attempt >= attempts:
-                    raise RuntimeError(
-                        f"arXiv request failed after {attempts} attempts ({exc.__class__.__name__})"
-                    ) from exc
-                time.sleep(min(delay, backoff_cap_seconds))
-                delay = min(max(delay * 2, 1.0), backoff_cap_seconds)
-                continue
-
-            if response.status_code == 429 or response.status_code >= 500:
-                if attempt >= attempts:
-                    response.raise_for_status()
-                retry_after = _parse_retry_after_seconds(response.headers.get("Retry-After"))
-                sleep_seconds = retry_after if retry_after is not None else min(delay, backoff_cap_seconds)
-                time.sleep(max(sleep_seconds, 0.0))
-                delay = min(max(delay * 2, 1.0), backoff_cap_seconds)
-                continue
-
-            response.raise_for_status()
-            return response.text
-
-    raise RuntimeError("arXiv request failed before receiving a response body")
+        response = http_request_with_retry(
+            client, "GET", arxiv_api_url,
+            max_retries=max_retries,
+            backoff_start_seconds=backoff_start_seconds,
+            backoff_cap_seconds=backoff_cap_seconds,
+            error_label="arXiv request",
+            params=params,
+        )
+        return response.text
 
 
 def _fetch_arxiv_id_feed(
@@ -180,35 +152,17 @@ def _fetch_arxiv_id_feed(
 
     params = {"id_list": ",".join(ids)}
     headers = {"User-Agent": user_agent}
-    attempts = max(1, max_retries)
-    delay = max(backoff_start_seconds, 0.0)
 
     with httpx.Client(timeout=timeout_seconds, headers=headers, follow_redirects=True) as client:
-        for attempt in range(1, attempts + 1):
-            try:
-                response = client.get(arxiv_api_url, params=params)
-            except httpx.HTTPError as exc:
-                if attempt >= attempts:
-                    raise RuntimeError(
-                        f"arXiv ID request failed after {attempts} attempts ({exc.__class__.__name__})"
-                    ) from exc
-                time.sleep(min(delay, backoff_cap_seconds))
-                delay = min(max(delay * 2, 1.0), backoff_cap_seconds)
-                continue
-
-            if response.status_code == 429 or response.status_code >= 500:
-                if attempt >= attempts:
-                    response.raise_for_status()
-                retry_after = _parse_retry_after_seconds(response.headers.get("Retry-After"))
-                sleep_seconds = retry_after if retry_after is not None else min(delay, backoff_cap_seconds)
-                time.sleep(max(sleep_seconds, 0.0))
-                delay = min(max(delay * 2, 1.0), backoff_cap_seconds)
-                continue
-
-            response.raise_for_status()
-            return response.text
-
-    raise RuntimeError("arXiv ID request failed before receiving a response body")
+        response = http_request_with_retry(
+            client, "GET", arxiv_api_url,
+            max_retries=max_retries,
+            backoff_start_seconds=backoff_start_seconds,
+            backoff_cap_seconds=backoff_cap_seconds,
+            error_label="arXiv ID request",
+            params=params,
+        )
+        return response.text
 
 
 def _fetch_arxiv_rss_feed(timeout_seconds: float, user_agent: str) -> str:
@@ -456,7 +410,7 @@ def fetch_papers_by_ids(
         )
         if api_feed:
             fetched = _parse_api_feed(api_feed)
-    except Exception:  # noqa: BLE001
+    except (httpx.HTTPError, httpx.HTTPStatusError, RuntimeError):
         fetched = []
 
     by_versioned: dict[str, PaperMetadata] = {}
@@ -510,8 +464,10 @@ def download_pdf(
         return out_path
 
     headers = {"User-Agent": user_agent}
-    with httpx.Client(timeout=timeout_seconds, headers=headers, follow_redirects=True) as client:
-        with client.stream("GET", paper.pdf_url) as response:
+    with (
+        httpx.Client(timeout=timeout_seconds, headers=headers, follow_redirects=True) as client,
+        client.stream("GET", paper.pdf_url) as response,
+    ):
             response.raise_for_status()
             with out_path.open("wb") as handle:
                 for chunk in response.iter_bytes():

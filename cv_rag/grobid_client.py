@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import time
 from pathlib import Path
 
 import httpx
+
+from cv_rag.http_retry import http_request_with_retry
 
 
 def pdf_to_tei(
@@ -15,37 +16,18 @@ def pdf_to_tei(
     backoff_cap_seconds: float = 20.0,
 ) -> str:
     endpoint = grobid_url.rstrip("/") + "/api/processFulltextDocument"
-    delay = backoff_start_seconds
 
-    for attempt in range(1, max_retries + 1):
-        with pdf_path.open("rb") as handle:
-            files = {"input": (pdf_path.name, handle, "application/pdf")}
-            try:
-                response = httpx.post(endpoint, files=files, timeout=timeout_seconds)
-            except httpx.HTTPError as exc:
-                if attempt == max_retries:
-                    raise RuntimeError(
-                        f"GROBID request failed after {max_retries} attempts for {pdf_path}"
-                    ) from exc
-                time.sleep(min(delay, backoff_cap_seconds))
-                delay = min(delay * 2, backoff_cap_seconds)
-                continue
+    def _prepare_kwargs() -> dict:
+        handle = pdf_path.open("rb")
+        return {"files": {"input": (pdf_path.name, handle, "application/pdf")}}
 
-        if response.status_code == 503:
-            if attempt == max_retries:
-                raise RuntimeError(
-                    f"GROBID returned 503 after {max_retries} attempts for {pdf_path}"
-                )
-            time.sleep(min(delay, backoff_cap_seconds))
-            delay = min(delay * 2, backoff_cap_seconds)
-            continue
-
-        if response.is_error:
-            raise RuntimeError(
-                f"GROBID request failed for {pdf_path} with status {response.status_code}: "
-                f"{response.text[:500]}"
-            )
-
+    with httpx.Client(timeout=timeout_seconds, follow_redirects=True) as client:
+        response = http_request_with_retry(
+            client, "POST", endpoint,
+            max_retries=max_retries,
+            backoff_start_seconds=backoff_start_seconds,
+            backoff_cap_seconds=backoff_cap_seconds,
+            error_label=f"GROBID request for {pdf_path}",
+            prepare_kwargs=_prepare_kwargs,
+        )
         return response.text
-
-    raise RuntimeError(f"Unable to parse {pdf_path} with GROBID")

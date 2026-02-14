@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 from typing import Any
-import uuid
 
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qmodels

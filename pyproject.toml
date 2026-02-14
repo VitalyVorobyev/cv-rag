@@ -20,6 +20,7 @@ cv-rag = "cv_rag.cli:app"
 [dependency-groups]
 dev = [
   "pytest>=8.2.0",
+  "ruff>=0.15.1",
 ]
 
 [build-system]
@@ -29,3 +30,19 @@ build-backend = "hatchling.build"
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "BLE", "SIM", "RUF"]
+ignore = ["B008"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["cv_rag"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true

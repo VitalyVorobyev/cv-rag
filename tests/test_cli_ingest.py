@@ -58,7 +58,7 @@ def test_ingest_passes_skip_set_by_default(monkeypatch: object, tmp_path: Path) 
             stats.update({"requested": limit, "selected": 1, "skipped": 1, "scanned": 2})
         return [_paper("2602.12177v1")]
 
-    def fake_ingest_papers(
+    def fake_run_ingest(
         papers: list[PaperMetadata],
         metadata_json_path: Path,
         force_grobid: bool,
@@ -69,7 +69,7 @@ def test_ingest_passes_skip_set_by_default(monkeypatch: object, tmp_path: Path) 
     monkeypatch.setattr(cli_module, "get_settings", lambda: settings)
     monkeypatch.setattr(cli_module.SQLiteStore, "get_ingested_versioned_ids", lambda self: {"2104.00680v1"})
     monkeypatch.setattr(cli_module, "fetch_cs_cv_papers", fake_fetch)
-    monkeypatch.setattr(cli_module, "_ingest_papers", fake_ingest_papers)
+    monkeypatch.setattr(cli_module, "_run_ingest", fake_run_ingest)
 
     result = runner.invoke(cli_module.app, ["ingest", "--limit", "1"])
 
@@ -108,7 +108,7 @@ def test_ingest_no_skip_disables_skip_set(monkeypatch: object, tmp_path: Path) -
     monkeypatch.setattr(cli_module, "fetch_cs_cv_papers", fake_fetch)
     monkeypatch.setattr(
         cli_module,
-        "_ingest_papers",
+        "_run_ingest",
         lambda papers, metadata_json_path, force_grobid, embed_batch_size: None,
     )
 
@@ -138,18 +138,18 @@ def test_ingest_no_new_papers_exits_zero_with_message(monkeypatch: object, tmp_p
             stats.update({"requested": limit, "selected": 0, "skipped": 3, "scanned": 3})
         return []
 
-    def fail_ingest_papers(
+    def fail_run_ingest(
         papers: list[PaperMetadata],
         metadata_json_path: Path,
         force_grobid: bool,
         embed_batch_size: int | None,
     ) -> None:
-        raise AssertionError("_ingest_papers should not be called when there are no new papers")
+        raise AssertionError("_run_ingest should not be called when there are no new papers")
 
     monkeypatch.setattr(cli_module, "get_settings", lambda: settings)
     monkeypatch.setattr(cli_module.SQLiteStore, "get_ingested_versioned_ids", lambda self: {"2602.12177v1"})
     monkeypatch.setattr(cli_module, "fetch_cs_cv_papers", fake_fetch)
-    monkeypatch.setattr(cli_module, "_ingest_papers", fail_ingest_papers)
+    monkeypatch.setattr(cli_module, "_run_ingest", fail_run_ingest)
 
     result = runner.invoke(cli_module.app, ["ingest", "--limit", "3"])
 

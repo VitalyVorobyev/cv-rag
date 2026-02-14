@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import xml.etree.ElementTree as ET
-
+from dataclasses import dataclass
 
 TEI_NS = {"tei": "http://www.tei-c.org/ns/1.0"}
 
@@ -47,10 +46,7 @@ def extract_sections(tei_xml: str) -> list[Section]:
 
         paragraphs = [_node_text(p) for p in div.findall(".//tei:p", TEI_NS)]
         paragraphs = [p for p in paragraphs if p]
-        if paragraphs:
-            text = "\n\n".join(paragraphs)
-        else:
-            text = _node_text(div)
+        text = "\n\n".join(paragraphs) if paragraphs else _node_text(div)
 
         if text:
             sections.append(Section(title=title, text=text))

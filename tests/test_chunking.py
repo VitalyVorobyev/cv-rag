@@ -1,3 +1,5 @@
+import itertools
+
 from cv_rag.chunking import chunk_sections
 from cv_rag.tei_extract import Section
 
@@ -12,7 +14,7 @@ def test_chunk_boundaries_and_overlap() -> None:
     assert all(len(chunk.text) <= 1200 for chunk in chunks)
 
     # Adjacent chunks should share vocabulary due to overlap.
-    for prev, curr in zip(chunks, chunks[1:]):
+    for prev, curr in itertools.pairwise(chunks):
         prev_tail = set(prev.text[-260:].split())
         curr_head = set(curr.text[:260].split())
         assert prev_tail.intersection(curr_head)

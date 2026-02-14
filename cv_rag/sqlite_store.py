@@ -7,7 +7,6 @@ from typing import Any
 
 from cv_rag.arxiv_sync import PaperMetadata
 
-
 TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
 
 

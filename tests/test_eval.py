@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-import subprocess
 
 from typer.testing import CliRunner
 
@@ -85,20 +84,13 @@ def test_eval_command_passes_with_matching_sources_and_citations(monkeypatch: ob
             ),
         ]
 
-    def fake_run(
-        cmd: list[str], check: bool, capture_output: bool, text: bool
-    ) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(
-            args=cmd,
-            returncode=0,
-            stdout="P1 [S1]\n\nP2 [S2]\n\nP3 [S1]\n\nP4 [S2][S1][S2]",
-            stderr="",
-        )
+    def fake_generate(**kwargs: object) -> str:
+        return "P1 [S1]\n\nP2 [S2]\n\nP3 [S1]\n\nP4 [S2][S1][S2]"
 
     monkeypatch.setattr(cli_module, "get_settings", lambda: settings)
     monkeypatch.setattr(cli_module, "QdrantStore", DummyQdrantStore)
     monkeypatch.setattr(cli_module.HybridRetriever, "retrieve", fake_retrieve)
-    monkeypatch.setattr(cli_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(cli_module, "mlx_generate", fake_generate)
 
     result = runner.invoke(
         cli_module.app,
@@ -151,15 +143,13 @@ def test_eval_command_fails_on_constraint_miss(monkeypatch: object, tmp_path: Pa
             )
         ]
 
-    def fail_run(
-        cmd: list[str], check: bool, capture_output: bool, text: bool
-    ) -> subprocess.CompletedProcess[str]:
+    def fail_generate(**kwargs: object) -> str:
         raise AssertionError("LLM generation should not run when retrieval constraints fail")
 
     monkeypatch.setattr(cli_module, "get_settings", lambda: settings)
     monkeypatch.setattr(cli_module, "QdrantStore", DummyQdrantStore)
     monkeypatch.setattr(cli_module.HybridRetriever, "retrieve", fake_retrieve)
-    monkeypatch.setattr(cli_module.subprocess, "run", fail_run)
+    monkeypatch.setattr(cli_module, "mlx_generate", fail_generate)
 
     result = runner.invoke(
         cli_module.app,

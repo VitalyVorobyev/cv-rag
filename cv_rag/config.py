@@ -31,6 +31,7 @@ class Settings(BaseModel):
     grobid_backoff_start_seconds: float = 2.0
     grobid_backoff_cap_seconds: float = 20.0
     embed_batch_size: int = 16
+    relevance_vector_threshold: float = 0.45
     user_agent: str = Field(default="cv-rag/0.1 (+local)")
 
     def ensure_directories(self) -> None:
