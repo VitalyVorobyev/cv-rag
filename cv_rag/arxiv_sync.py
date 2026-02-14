@@ -395,6 +395,7 @@ def fetch_papers_by_ids(
     backoff_start_seconds: float = 2.0,
     backoff_cap_seconds: float = 30.0,
     id_batch_size: int = ARXIV_ID_BATCH_SIZE,
+    resolve_unversioned_to_latest: bool = False,
 ) -> list[PaperMetadata]:
     requested_ids: list[str] = []
     seen: set[str] = set()
@@ -440,17 +441,26 @@ def fetch_papers_by_ids(
         download_id = requested_id if requested_version else base_id
 
         source = by_versioned.get(download_id) or by_base.get(base_id)
+        if (
+            resolve_unversioned_to_latest
+            and not requested_version
+            and source
+            and source.arxiv_id_with_version
+            and extract_version(source.arxiv_id_with_version)
+        ):
+            download_id = source.arxiv_id_with_version
         title = source.title if source and source.title else f"arXiv:{download_id}"
         summary = source.summary if source else ""
         authors = source.authors if source else []
         published = source.published if source else None
         updated = source.updated if source else None
+        resolved_version = extract_version(download_id)
 
         papers.append(
             PaperMetadata(
                 arxiv_id=base_id,
                 arxiv_id_with_version=download_id,
-                version=requested_version or (source.version if source else None),
+                version=requested_version or resolved_version or (source.version if source else None),
                 title=title,
                 summary=summary,
                 published=published,

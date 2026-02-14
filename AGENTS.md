@@ -19,6 +19,8 @@ docker compose up -d
 uv run cv-rag ingest --limit 10
 uv run cv-rag ingest-ids 2104.00680 1911.11763
 uv run cv-rag ingest-jsonl --source data/curation/awesome_seed.jsonl
+uv run cv-rag ingest-ids 2104.00680 1911.11763 --no-skip-ingested
+uv run cv-rag ingest-jsonl --source data/curation/awesome_seed.jsonl --no-skip-ingested
 uv run cv-rag query "vision transformers"
 uv run cv-rag answer "vision transformers" --mode auto --model <mlx-model-path>
 uv run cv-rag seed-awesome --sources data/curation/awesome_sources.txt --out-dir data/curation
@@ -47,6 +49,8 @@ uv run ruff check --fix cv_rag/ tests/  # auto-fix
 # Verbose logging (any command)
 uv run cv-rag -v ingest --limit 5
 ```
+
+`ingest`, `ingest-ids`, and `ingest-jsonl` all default to exact-version dedupe (`--skip-ingested`) and can be overridden with `--no-skip-ingested`. For unversioned explicit IDs, cv-rag attempts version resolution first and continues best-effort with a warning if unresolved.
 
 ## Architecture
 

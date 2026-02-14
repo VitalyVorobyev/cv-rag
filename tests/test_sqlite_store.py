@@ -72,6 +72,107 @@ def test_get_ingested_versioned_ids_returns_non_empty_versions(tmp_path: Path) -
         store.close()
 
 
+def test_list_legacy_unversioned_arxiv_ids_detects_legacy_rows(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "test.sqlite3")
+    try:
+        store.create_schema()
+        store.upsert_paper(
+            paper=PaperMetadata(
+                arxiv_id="2104.00680",
+                arxiv_id_with_version="2104.00680v1",
+                version="v1",
+                title="LoFTR",
+                summary="",
+                published=None,
+                updated=None,
+                authors=["A. Author"],
+                pdf_url="https://arxiv.org/pdf/2104.00680v1.pdf",
+                abs_url="https://arxiv.org/abs/2104.00680v1",
+            ),
+            pdf_path=None,
+            tei_path=None,
+        )
+        store.upsert_paper(
+            paper=PaperMetadata(
+                arxiv_id="1911.11763",
+                arxiv_id_with_version="1911.11763",
+                version=None,
+                title="SuperGlue",
+                summary="",
+                published=None,
+                updated=None,
+                authors=["B. Author"],
+                pdf_url="https://arxiv.org/pdf/1911.11763.pdf",
+                abs_url="https://arxiv.org/abs/1911.11763",
+            ),
+            pdf_path=None,
+            tei_path=None,
+        )
+        store.upsert_paper(
+            paper=PaperMetadata(
+                arxiv_id="2301.00001",
+                arxiv_id_with_version="",
+                version=None,
+                title="Legacy",
+                summary="",
+                published=None,
+                updated=None,
+                authors=["C. Author"],
+                pdf_url="https://arxiv.org/pdf/2301.00001.pdf",
+                abs_url="https://arxiv.org/abs/2301.00001",
+            ),
+            pdf_path=None,
+            tei_path=None,
+        )
+
+        assert store.list_legacy_unversioned_arxiv_ids() == ["1911.11763", "2301.00001"]
+    finally:
+        store.close()
+
+
+def test_update_paper_version_fields_updates_versioned_columns(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "test.sqlite3")
+    try:
+        store.create_schema()
+        store.upsert_paper(
+            paper=PaperMetadata(
+                arxiv_id="2104.00680",
+                arxiv_id_with_version="2104.00680",
+                version=None,
+                title="LoFTR",
+                summary="",
+                published=None,
+                updated=None,
+                authors=["A. Author"],
+                pdf_url="https://arxiv.org/pdf/2104.00680.pdf",
+                abs_url="https://arxiv.org/abs/2104.00680",
+            ),
+            pdf_path=None,
+            tei_path=None,
+        )
+
+        updated = store.update_paper_version_fields(
+            arxiv_id="2104.00680",
+            arxiv_id_with_version="2104.00680v3",
+            version="v3",
+        )
+
+        row = store.conn.execute(
+            """
+            SELECT arxiv_id_with_version, version
+            FROM papers
+            WHERE arxiv_id = ?
+            """,
+            ("2104.00680",),
+        ).fetchone()
+        assert updated is True
+        assert row is not None
+        assert row["arxiv_id_with_version"] == "2104.00680v3"
+        assert row["version"] == "v3"
+    finally:
+        store.close()
+
+
 def test_paper_metrics_upsert_and_read(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "test.sqlite3")
     try:

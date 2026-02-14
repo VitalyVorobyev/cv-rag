@@ -115,6 +115,14 @@ uv run cv-rag ingest -n 50 --no-skip-ingested
 uv run cv-rag ingest-ids 2104.00680 1911.11763
 ```
 
+By default, `ingest-ids` skips exact versions already present in SQLite (`arxiv_id_with_version`).
+For unversioned inputs, cv-rag resolves to the latest arXiv version when possible before dedupe.
+If version resolution fails, ingest continues in best-effort mode and prints a warning.
+
+```bash
+uv run cv-rag ingest-ids 2104.00680 1911.11763 --no-skip-ingested
+```
+
 ### Ingest papers from JSONL seed files
 
 ```bash
@@ -123,7 +131,12 @@ uv run cv-rag ingest-jsonl --source data/curation/awesome_seed.jsonl
 
 # Optional cap for quick batches
 uv run cv-rag ingest-jsonl --source data/curation/awesome_seed.jsonl --limit 200
+
+# Disable exact-version dedupe for this run
+uv run cv-rag ingest-jsonl --source data/curation/awesome_seed.jsonl --no-skip-ingested
 ```
+
+`ingest-jsonl` uses the same exact-version skip behavior and best-effort resolution warning semantics as `ingest-ids`.
 
 ### Inspect retrieval
 

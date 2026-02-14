@@ -61,6 +61,78 @@ def test_fetch_papers_by_ids_falls_back_to_direct_urls(monkeypatch: object) -> N
     assert papers[1].pdf_url == "https://arxiv.org/pdf/1911.11763v2.pdf"
 
 
+def test_fetch_papers_by_ids_resolves_unversioned_to_latest_when_enabled(monkeypatch: object) -> None:
+    def fake_fetch(
+        arxiv_api_url: str,
+        ids: list[str],
+        timeout_seconds: float,
+        user_agent: str,
+        max_retries: int,
+        backoff_start_seconds: float,
+        backoff_cap_seconds: float,
+    ) -> str:
+        return ",".join(ids)
+
+    def fake_parse(feed_text: str) -> list[PaperMetadata]:
+        out: list[PaperMetadata] = []
+        for item in (token for token in feed_text.split(",") if token):
+            if "v" in item:
+                out.append(_paper(arxiv_id_with_version=item, title=f"title:{item}"))
+            else:
+                out.append(_paper(arxiv_id_with_version=f"{item}v3", title=f"title:{item}"))
+        return out
+
+    monkeypatch.setattr("cv_rag.arxiv_sync._fetch_arxiv_id_feed", fake_fetch)
+    monkeypatch.setattr("cv_rag.arxiv_sync._parse_api_feed", fake_parse)
+
+    papers = fetch_papers_by_ids(
+        ids=["2104.00680", "1911.11763v2"],
+        arxiv_api_url="https://export.arxiv.org/api/query",
+        timeout_seconds=5.0,
+        user_agent="test-agent",
+        resolve_unversioned_to_latest=True,
+    )
+
+    assert [paper.arxiv_id_with_version for paper in papers] == ["2104.00680v3", "1911.11763v2"]
+    assert papers[0].pdf_url == "https://arxiv.org/pdf/2104.00680v3.pdf"
+
+
+def test_fetch_papers_by_ids_keeps_unversioned_when_resolution_disabled(monkeypatch: object) -> None:
+    def fake_fetch(
+        arxiv_api_url: str,
+        ids: list[str],
+        timeout_seconds: float,
+        user_agent: str,
+        max_retries: int,
+        backoff_start_seconds: float,
+        backoff_cap_seconds: float,
+    ) -> str:
+        return ",".join(ids)
+
+    def fake_parse(feed_text: str) -> list[PaperMetadata]:
+        out: list[PaperMetadata] = []
+        for item in (token for token in feed_text.split(",") if token):
+            if "v" in item:
+                out.append(_paper(arxiv_id_with_version=item, title=f"title:{item}"))
+            else:
+                out.append(_paper(arxiv_id_with_version=f"{item}v3", title=f"title:{item}"))
+        return out
+
+    monkeypatch.setattr("cv_rag.arxiv_sync._fetch_arxiv_id_feed", fake_fetch)
+    monkeypatch.setattr("cv_rag.arxiv_sync._parse_api_feed", fake_parse)
+
+    papers = fetch_papers_by_ids(
+        ids=["2104.00680", "1911.11763v2"],
+        arxiv_api_url="https://export.arxiv.org/api/query",
+        timeout_seconds=5.0,
+        user_agent="test-agent",
+        resolve_unversioned_to_latest=False,
+    )
+
+    assert [paper.arxiv_id_with_version for paper in papers] == ["2104.00680", "1911.11763v2"]
+    assert papers[0].pdf_url == "https://arxiv.org/pdf/2104.00680.pdf"
+
+
 def test_fetch_papers_by_ids_batches_requests(monkeypatch: object) -> None:
     calls: list[list[str]] = []
 

@@ -8,6 +8,7 @@ from typing import Any
 from cv_rag.arxiv_sync import PaperMetadata
 
 TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
+VERSION_SUFFIX_RE = re.compile(r"v\d+$", re.IGNORECASE)
 
 
 class SQLiteStore:
@@ -175,6 +176,42 @@ class SQLiteStore:
             for row in rows
             if str(row["arxiv_id_with_version"]).strip()
         }
+
+    def list_legacy_unversioned_arxiv_ids(self) -> list[str]:
+        rows = self.conn.execute(
+            """
+            SELECT arxiv_id, arxiv_id_with_version
+            FROM papers
+            """
+        ).fetchall()
+        legacy_ids: set[str] = set()
+        for row in rows:
+            base_id = str(row["arxiv_id"]).strip()
+            if not base_id:
+                continue
+            raw_versioned = row["arxiv_id_with_version"]
+            versioned = str(raw_versioned).strip() if raw_versioned is not None else ""
+            if not versioned or not VERSION_SUFFIX_RE.search(versioned):
+                legacy_ids.add(base_id)
+        return sorted(legacy_ids)
+
+    def update_paper_version_fields(
+        self,
+        *,
+        arxiv_id: str,
+        arxiv_id_with_version: str,
+        version: str | None,
+    ) -> bool:
+        cursor = self.conn.execute(
+            """
+            UPDATE papers
+            SET arxiv_id_with_version = ?, version = ?
+            WHERE arxiv_id = ?
+            """,
+            (arxiv_id_with_version, version, arxiv_id),
+        )
+        self.conn.commit()
+        return cursor.rowcount > 0
 
     def list_paper_arxiv_ids(self, limit: int | None = None) -> list[str]:
         sql = "SELECT arxiv_id FROM papers ORDER BY arxiv_id ASC"
