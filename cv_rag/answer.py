@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass
 
 from cv_rag.retrieve import (
     HybridRetriever,
@@ -18,15 +19,8 @@ COMPARISON_QUERY_RE = re.compile(
 )
 CITATION_REF_RE = re.compile(r"\[S(\d+)\]")
 PARAGRAPH_SPLIT_RE = re.compile(r"\n\s*\n+")
-ANSWER_AUX_QUERIES = [
-    "LoFTR supervision loss objective coarse fine",
-    "SuperGlue loss negative log-likelihood dustbin Sinkhorn optimal transport",
-]
-
 PREFACE_RE = re.compile(r"^(answer|citations?|sources?)\s*:\s*$", re.IGNORECASE)
 HEADING_RE = re.compile(r"^#{1,6}\s+\S")
-
-MIN_TOTAL_CITATIONS = 6
 
 
 def is_comparison_question(question: str) -> bool:
@@ -78,11 +72,45 @@ def validate_answer_citations(answer_text: str, source_count: int) -> tuple[bool
     if checked == 0:
         return False, "Answer has no content paragraphs."
 
-    required_total = max(MIN_TOTAL_CITATIONS, checked)
+    required_total = checked
     if total_citations < required_total:
         return False, f"Found {total_citations} citations, need at least {required_total}."
 
     return True, ""
+
+
+@dataclass(slots=True)
+class CrossDocSupportDecision:
+    filtered_chunks: list[RetrievedChunk]
+    should_refuse: bool
+    warnings: list[str]
+
+
+def enforce_cross_doc_support(question: str, chunks: list[RetrievedChunk]) -> CrossDocSupportDecision:
+    comparison = is_comparison_question(question)
+    top_doc_counts = top_doc_source_counts(chunks)
+    enough_cross_doc_support = len(top_doc_counts) >= 2 and all(count >= 2 for _, count in top_doc_counts)
+
+    if comparison:
+        if enough_cross_doc_support:
+            return CrossDocSupportDecision(filtered_chunks=chunks, should_refuse=False, warnings=[])
+        warnings = [
+            "Warning: need at least 2 sources from each of the top 2 papers"
+            " (by score) for robust comparison grounding."
+        ]
+        if top_doc_counts:
+            details = ", ".join(f"{arxiv_id} ({count})" for arxiv_id, count in top_doc_counts)
+            warnings.append(f"Current top-paper source counts: {details}")
+        return CrossDocSupportDecision(filtered_chunks=chunks, should_refuse=True, warnings=warnings)
+
+    filtered_chunks = chunks
+    if len(top_doc_counts) >= 2:
+        top_arxiv, top_count = top_doc_counts[0]
+        second_arxiv, second_count = top_doc_counts[1]
+        if top_count >= 2 and second_count == 1:
+            filtered_chunks = [chunk for chunk in chunks if chunk.arxiv_id != second_arxiv]
+
+    return CrossDocSupportDecision(filtered_chunks=filtered_chunks, should_refuse=False, warnings=[])
 
 
 def build_query_prompt(query: str, chunks: list[RetrievedChunk]) -> str:
@@ -212,7 +240,7 @@ def retrieve_for_answer(
     section_boost: float,
     entity_tokens: list[str],
 ) -> tuple[list[RetrievedChunk], list[RetrievedChunk]]:
-    queries = [question, *ANSWER_AUX_QUERIES]
+    queries = [question]
     per_query_top_k = max(k, 12)
     per_query_branch_k = max(per_query_top_k * 2, 24)
     merged_input: list[RetrievedChunk] = []

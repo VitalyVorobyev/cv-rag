@@ -16,9 +16,9 @@ from cv_rag.answer import (
     build_query_prompt,
     build_repair_prompt,
     build_strict_answer_prompt,
+    enforce_cross_doc_support,
     is_comparison_question,
     retrieve_for_answer,
-    top_doc_source_counts,
     validate_answer_citations,
 )
 from cv_rag.arxiv_sync import (
@@ -537,19 +537,13 @@ def answer(
         console.print("[red]No sources retrieved for this question. Run ingest first or broaden the query.[/red]")
         raise typer.Exit(code=1)
 
-    top_doc_counts = top_doc_source_counts(chunks)
-    enough_cross_doc_support = len(top_doc_counts) >= 2 and all(count >= 2 for _, count in top_doc_counts)
-    if not enough_cross_doc_support:
-        console.print(
-            "[yellow]Warning: need at least 2 sources from each of the top 2 papers"
-            " (by score) for robust comparison grounding.[/yellow]"
-        )
-        if top_doc_counts:
-            details = ", ".join(f"{arxiv_id} ({count})" for arxiv_id, count in top_doc_counts)
-            console.print(f"[yellow]Current top-paper source counts: {details}[/yellow]")
-        if is_comparison_question(question):
-            console.print("[red]Refusing to answer comparison without sufficient cross-paper coverage.[/red]")
-            raise typer.Exit(code=1)
+    cross_doc_decision = enforce_cross_doc_support(question, chunks)
+    chunks = cross_doc_decision.filtered_chunks
+    for warning in cross_doc_decision.warnings:
+        console.print(f"[yellow]{warning}[/yellow]")
+    if cross_doc_decision.should_refuse and is_comparison_question(question):
+        console.print("[red]Refusing to answer comparison without sufficient cross-paper coverage.[/red]")
+        raise typer.Exit(code=1)
 
     if show_sources:
         table = Table(title="Retrieved Sources")

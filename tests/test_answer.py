@@ -5,7 +5,12 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 import cv_rag.cli as cli_module
-from cv_rag.answer import build_strict_answer_prompt, retrieve_for_answer, validate_answer_citations
+from cv_rag.answer import (
+    build_strict_answer_prompt,
+    enforce_cross_doc_support,
+    retrieve_for_answer,
+    validate_answer_citations,
+)
 from cv_rag.config import Settings
 from cv_rag.retrieve import RetrievedChunk
 
@@ -52,11 +57,91 @@ def test_validate_answer_citations_rejects_uncited_paragraph() -> None:
     assert reason == "Paragraph 1 has no inline [S#] citation."
 
 
+def test_validate_answer_citations_accepts_one_citation_per_paragraph() -> None:
+    answer = (
+        "SuperGlue uses an assignment matrix objective with a dustbin term [S1].\n\n"
+        "The loss is optimized jointly with Sinkhorn-based matching scores [S2].\n\n"
+        "LoFTR instead predicts dense correspondences without keypoint detection [S3].\n\n"
+        "These design choices produce different failure modes on low-texture regions [S2]."
+    )
+    valid, reason = validate_answer_citations(answer, source_count=3)
+    assert valid
+    assert reason == ""
+
+
 def test_validate_answer_citations_rejects_out_of_range_citation() -> None:
     answer = "This claim cites a non-existent source [S9]."
     valid, reason = validate_answer_citations(answer, source_count=3)
     assert not valid
     assert "outside S1..S3" in reason
+
+
+def test_enforce_cross_doc_support_non_comparison_does_not_refuse() -> None:
+    chunks = [
+        RetrievedChunk(
+            chunk_id="2104.00680:0",
+            arxiv_id="2104.00680",
+            title="LoFTR",
+            section_title="Method",
+            text="Details",
+            fused_score=0.9,
+        ),
+        RetrievedChunk(
+            chunk_id="2104.00680:1",
+            arxiv_id="2104.00680",
+            title="LoFTR",
+            section_title="Training",
+            text="Details",
+            fused_score=0.8,
+        ),
+        RetrievedChunk(
+            chunk_id="1911.11763:0",
+            arxiv_id="1911.11763",
+            title="SuperGlue",
+            section_title="Method",
+            text="Details",
+            fused_score=0.7,
+        ),
+    ]
+
+    decision = enforce_cross_doc_support("Explain LoFTR supervision loss objective.", chunks)
+    assert not decision.should_refuse
+    assert decision.warnings == []
+    assert {chunk.arxiv_id for chunk in decision.filtered_chunks} == {"2104.00680"}
+
+
+def test_enforce_cross_doc_support_comparison_refuses_on_insufficient_coverage() -> None:
+    chunks = [
+        RetrievedChunk(
+            chunk_id="2104.00680:0",
+            arxiv_id="2104.00680",
+            title="LoFTR",
+            section_title="Method",
+            text="Details",
+            fused_score=0.9,
+        ),
+        RetrievedChunk(
+            chunk_id="2104.00680:1",
+            arxiv_id="2104.00680",
+            title="LoFTR",
+            section_title="Training",
+            text="Details",
+            fused_score=0.8,
+        ),
+        RetrievedChunk(
+            chunk_id="1911.11763:0",
+            arxiv_id="1911.11763",
+            title="SuperGlue",
+            section_title="Method",
+            text="Details",
+            fused_score=0.7,
+        ),
+    ]
+
+    decision = enforce_cross_doc_support("Compare LoFTR vs SuperGlue.", chunks)
+    assert decision.should_refuse
+    assert decision.filtered_chunks == chunks
+    assert any("need at least 2 sources" in warning for warning in decision.warnings)
 
 
 def test_retrieve_for_answer_does_not_backfill_after_entity_filter() -> None:
@@ -233,6 +318,96 @@ def test_answer_command_refuses_when_no_relevant_sources(
 
     assert result.exit_code == 1
     assert "Not found in indexed corpus. Try: cv-rag ingest-ids 2104.00680 1911.11763" in result.output
+
+
+def test_answer_non_comparison_skips_cross_doc_warning(
+    monkeypatch: object, tmp_path: Path
+) -> None:
+    runner = CliRunner()
+
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        pdf_dir=tmp_path / "data" / "pdfs",
+        tei_dir=tmp_path / "data" / "tei",
+        metadata_dir=tmp_path / "data" / "metadata",
+        metadata_json_path=tmp_path / "data" / "metadata" / "arxiv_cs_cv.json",
+        sqlite_path=tmp_path / "cv_rag.sqlite3",
+    )
+
+    class DummyQdrantStore:
+        def __init__(self, url: str, collection_name: str) -> None:
+            self.url = url
+            self.collection_name = collection_name
+
+    def fake_retrieve(
+        self: object,
+        query: str,
+        top_k: int = 8,
+        vector_k: int = 12,
+        keyword_k: int = 12,
+        require_relevance: bool = False,
+        vector_score_threshold: float = 0.45,
+        max_per_doc: int = 4,
+        section_boost: float = 0.0,
+    ) -> list[RetrievedChunk]:
+        return [
+            RetrievedChunk(
+                chunk_id="1911.11763:0",
+                arxiv_id="1911.11763",
+                title="SuperGlue",
+                section_title="Method",
+                text="SuperGlue uses a dustbin in optimal matching.",
+                fused_score=0.95,
+                vector_score=0.9,
+            ),
+            RetrievedChunk(
+                chunk_id="1911.11763:1",
+                arxiv_id="1911.11763",
+                title="SuperGlue",
+                section_title="Training",
+                text="SuperGlue training uses a matching objective.",
+                fused_score=0.9,
+                vector_score=0.85,
+            ),
+            RetrievedChunk(
+                chunk_id="1905.04193:0",
+                arxiv_id="1905.04193",
+                title="MLP-Mixer",
+                section_title="Method",
+                text="Unrelated architecture details.",
+                fused_score=0.8,
+                vector_score=0.8,
+            ),
+        ]
+
+    def fake_generate(**kwargs: object) -> str:
+        return (
+            "SuperGlue includes a dustbin node to absorb unmatched keypoints [S1].\n\n"
+            "Its training objective scores correspondences through learned matching [S2].\n\n"
+            "The method relies on context aggregation over candidate matches [S1].\n\n"
+            "This objective formulation regularizes ambiguous matches [S2]."
+        )
+
+    monkeypatch.setattr(cli_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(cli_module, "QdrantStore", DummyQdrantStore)
+    monkeypatch.setattr(cli_module.HybridRetriever, "retrieve", fake_retrieve)
+    monkeypatch.setattr(cli_module, "mlx_generate", fake_generate)
+
+    result = runner.invoke(
+        cli_module.app,
+        [
+            "answer",
+            "Explain SuperGlue's loss and the role of dustbins.",
+            "--k",
+            "8",
+            "--model",
+            "mlx-community/Qwen2.5-7B-Instruct-4bit",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "need at least 2 sources from each of the top 2 papers" not in result.output
+    assert "Refusing to answer comparison" not in result.output
 
 
 def test_answer_refuses_comparison_when_top_doc_coverage_insufficient(

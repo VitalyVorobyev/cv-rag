@@ -151,7 +151,11 @@ def _fetch_arxiv_id_feed(
     if not ids:
         return ""
 
-    params = {"id_list": ",".join(ids)}
+    params = {
+        "id_list": ",".join(ids),
+        "start": 0,
+        "max_results": len(ids),
+    }
     headers = {"User-Agent": user_agent}
 
     with httpx.Client(timeout=timeout_seconds, headers=headers, follow_redirects=True) as client:

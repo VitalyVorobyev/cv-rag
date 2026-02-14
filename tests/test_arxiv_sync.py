@@ -1,4 +1,10 @@
-from cv_rag.arxiv_sync import PaperMetadata, fetch_cs_cv_papers, fetch_papers_by_ids, normalize_arxiv_id
+from cv_rag.arxiv_sync import (
+    PaperMetadata,
+    _fetch_arxiv_id_feed,
+    fetch_cs_cv_papers,
+    fetch_papers_by_ids,
+    normalize_arxiv_id,
+)
 
 
 def _paper(arxiv_id_with_version: str, title: str = "Paper") -> PaperMetadata:
@@ -53,6 +59,125 @@ def test_fetch_papers_by_ids_falls_back_to_direct_urls(monkeypatch: object) -> N
     assert [paper.arxiv_id_with_version for paper in papers] == ["2104.00680", "1911.11763v2"]
     assert papers[0].pdf_url == "https://arxiv.org/pdf/2104.00680.pdf"
     assert papers[1].pdf_url == "https://arxiv.org/pdf/1911.11763v2.pdf"
+
+
+def test_fetch_papers_by_ids_batches_requests(monkeypatch: object) -> None:
+    calls: list[list[str]] = []
+
+    def fake_fetch(
+        arxiv_api_url: str,
+        ids: list[str],
+        timeout_seconds: float,
+        user_agent: str,
+        max_retries: int,
+        backoff_start_seconds: float,
+        backoff_cap_seconds: float,
+    ) -> str:
+        calls.append(ids)
+        return ",".join(ids)
+
+    def fake_parse(feed_text: str) -> list[PaperMetadata]:
+        ids = [item for item in feed_text.split(",") if item]
+        return [_paper(arxiv_id_with_version=item, title=f"title:{item}") for item in ids]
+
+    monkeypatch.setattr("cv_rag.arxiv_sync._fetch_arxiv_id_feed", fake_fetch)
+    monkeypatch.setattr("cv_rag.arxiv_sync._parse_api_feed", fake_parse)
+
+    papers = fetch_papers_by_ids(
+        ids=["2104.00680", "1911.11763", "2201.00001", "2201.00002", "2201.00003"],
+        arxiv_api_url="https://export.arxiv.org/api/query",
+        timeout_seconds=5.0,
+        user_agent="test-agent",
+        id_batch_size=2,
+    )
+
+    assert calls == [
+        ["2104.00680", "1911.11763"],
+        ["2201.00001", "2201.00002"],
+        ["2201.00003"],
+    ]
+    assert [paper.arxiv_id_with_version for paper in papers] == [
+        "2104.00680",
+        "1911.11763",
+        "2201.00001",
+        "2201.00002",
+        "2201.00003",
+    ]
+
+
+def test_fetch_papers_by_ids_keeps_partial_metadata_on_batch_failure(monkeypatch: object) -> None:
+    calls: list[list[str]] = []
+
+    def fake_fetch(
+        arxiv_api_url: str,
+        ids: list[str],
+        timeout_seconds: float,
+        user_agent: str,
+        max_retries: int,
+        backoff_start_seconds: float,
+        backoff_cap_seconds: float,
+    ) -> str:
+        calls.append(ids)
+        if "2301.00001" in ids:
+            raise RuntimeError("simulated batch failure")
+        return ",".join(ids)
+
+    def fake_parse(feed_text: str) -> list[PaperMetadata]:
+        ids = [item for item in feed_text.split(",") if item]
+        return [_paper(arxiv_id_with_version=item, title=f"title:{item}") for item in ids]
+
+    monkeypatch.setattr("cv_rag.arxiv_sync._fetch_arxiv_id_feed", fake_fetch)
+    monkeypatch.setattr("cv_rag.arxiv_sync._parse_api_feed", fake_parse)
+
+    papers = fetch_papers_by_ids(
+        ids=["2104.00680", "1911.11763", "2301.00001"],
+        arxiv_api_url="https://export.arxiv.org/api/query",
+        timeout_seconds=5.0,
+        user_agent="test-agent",
+        id_batch_size=2,
+    )
+
+    assert calls == [["2104.00680", "1911.11763"], ["2301.00001"]]
+    assert [paper.title for paper in papers] == [
+        "title:2104.00680",
+        "title:1911.11763",
+        "arXiv:2301.00001",
+    ]
+
+
+def test_fetch_arxiv_id_feed_requests_full_batch_size(monkeypatch: object) -> None:
+    captured_params: dict[str, object] = {}
+
+    class DummyResponse:
+        text = "<feed></feed>"
+
+    def fake_retry(
+        client: object,
+        method: str,
+        url: str,
+        **request_kwargs: object,
+    ) -> DummyResponse:
+        params = request_kwargs.get("params")
+        assert isinstance(params, dict)
+        captured_params.update(params)
+        return DummyResponse()
+
+    monkeypatch.setattr("cv_rag.arxiv_sync.http_request_with_retry", fake_retry)
+
+    feed_text = _fetch_arxiv_id_feed(
+        arxiv_api_url="https://export.arxiv.org/api/query",
+        ids=["2104.00680", "1911.11763", "2201.00001"],
+        timeout_seconds=5.0,
+        user_agent="test-agent",
+        max_retries=1,
+        backoff_start_seconds=1.0,
+        backoff_cap_seconds=2.0,
+    )
+
+    assert feed_text == "<feed></feed>"
+    assert captured_params["start"] == 0
+    assert captured_params["max_results"] == 3
+    assert captured_params["id_list"] == "2104.00680,1911.11763,2201.00001"
 
 
 def test_fetch_cs_cv_papers_skips_exact_versions(monkeypatch: object) -> None:
