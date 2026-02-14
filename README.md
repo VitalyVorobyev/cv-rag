@@ -149,6 +149,14 @@ uv run cv-rag eval --suite eval/questions.yaml
 
 This runs retrieval + answer generation for each case, validates inline citations, and exits non-zero if any case fails.
 
+### Show local database statistics
+
+```bash
+uv run cv-rag stats
+```
+
+Use `--top-venues 0` to skip venue frequency output.
+
 ---
 
 ## Configuration

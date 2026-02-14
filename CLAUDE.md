@@ -21,6 +21,7 @@ uv run cv-rag ingest-ids 2104.00680 1911.11763
 uv run cv-rag query "vision transformers"
 uv run cv-rag answer "vision transformers" --model <mlx-model-path>
 uv run cv-rag doctor
+uv run cv-rag curate --refresh-days 30
 
 # Run tests
 uv run pytest

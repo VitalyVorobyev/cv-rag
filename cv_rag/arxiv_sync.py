@@ -14,6 +14,7 @@ from cv_rag.http_retry import http_request_with_retry
 
 ARXIV_VERSION_RE = re.compile(r"v\d+$")
 ARXIV_RSS_URL = "https://export.arxiv.org/rss/cs.CV"
+ARXIV_ID_BATCH_SIZE = 50
 
 
 class PaperMetadata(BaseModel):
@@ -376,6 +377,11 @@ def _canonical_requested_id(raw_id: str) -> str:
     return f"{normalized}{version or ''}"
 
 
+def _iter_id_batches(ids: list[str], batch_size: int) -> list[list[str]]:
+    safe_batch_size = max(1, batch_size)
+    return [ids[idx : idx + safe_batch_size] for idx in range(0, len(ids), safe_batch_size)]
+
+
 def fetch_papers_by_ids(
     ids: list[str],
     arxiv_api_url: str,
@@ -384,6 +390,7 @@ def fetch_papers_by_ids(
     max_retries: int = 5,
     backoff_start_seconds: float = 2.0,
     backoff_cap_seconds: float = 30.0,
+    id_batch_size: int = ARXIV_ID_BATCH_SIZE,
 ) -> list[PaperMetadata]:
     requested_ids: list[str] = []
     seen: set[str] = set()
@@ -398,20 +405,22 @@ def fetch_papers_by_ids(
         return []
 
     fetched: list[PaperMetadata] = []
-    try:
-        api_feed = _fetch_arxiv_id_feed(
-            arxiv_api_url=arxiv_api_url,
-            ids=requested_ids,
-            timeout_seconds=timeout_seconds,
-            user_agent=user_agent,
-            max_retries=max_retries,
-            backoff_start_seconds=backoff_start_seconds,
-            backoff_cap_seconds=backoff_cap_seconds,
-        )
+    for id_batch in _iter_id_batches(requested_ids, batch_size=id_batch_size):
+        try:
+            api_feed = _fetch_arxiv_id_feed(
+                arxiv_api_url=arxiv_api_url,
+                ids=id_batch,
+                timeout_seconds=timeout_seconds,
+                user_agent=user_agent,
+                max_retries=max_retries,
+                backoff_start_seconds=backoff_start_seconds,
+                backoff_cap_seconds=backoff_cap_seconds,
+            )
+        except (httpx.HTTPError, httpx.HTTPStatusError, RuntimeError):
+            continue
+
         if api_feed:
-            fetched = _parse_api_feed(api_feed)
-    except (httpx.HTTPError, httpx.HTTPStatusError, RuntimeError):
-        fetched = []
+            fetched.extend(_parse_api_feed(api_feed))
 
     by_versioned: dict[str, PaperMetadata] = {}
     by_base: dict[str, PaperMetadata] = {}
