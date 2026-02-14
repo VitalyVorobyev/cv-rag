@@ -16,8 +16,12 @@ from cv_rag.http_retry import http_request_with_retry
 logger = logging.getLogger(__name__)
 
 DEFAULT_TIER_A_SEED_PATH = Path("data/curation/tierA_seed.txt")
+DEFAULT_TIER_A_ARXIV_PATH = Path("data/curation/tierA_arxiv.txt")
+DEFAULT_TIER_A_DOIS_PATH = Path("data/curation/tierA_dois.txt")
+
 README_CANDIDATES = ("README.md", "readme.md")
 _REPO_PART_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+
 _ARXIV_BASE_ID_RE = r"(?:\d{4}\.\d{4,5}|[a-z-]+(?:\.[a-z-]+)?/\d{7})"
 _ARXIV_ABS_URL_RE = re.compile(
     rf"https?://arxiv\.org/abs/(?P<base_id>{_ARXIV_BASE_ID_RE})(?P<version>v\d+)?\b",
@@ -32,6 +36,21 @@ _ARXIV_TEXT_RE = re.compile(
     flags=re.IGNORECASE,
 )
 
+_DOI_CORE_RE = r"10\.\d{4,9}/[-._;()/:A-Z0-9]+"
+_DOI_URL_RE = re.compile(
+    rf"https?://(?:dx\.)?doi\.org/(?P<doi>{_DOI_CORE_RE})",
+    flags=re.IGNORECASE,
+)
+_DOI_PREFIX_RE = re.compile(
+    rf"\bdoi\s*:\s*(?P<doi>{_DOI_CORE_RE})",
+    flags=re.IGNORECASE,
+)
+_DOI_BARE_RE = re.compile(
+    rf"(?<![A-Za-z0-9])(?P<doi>{_DOI_CORE_RE})",
+    flags=re.IGNORECASE,
+)
+_DOI_TRAILING_CHARS = ")]}>,.;:\"'"
+
 
 @dataclass(slots=True, frozen=True)
 class RepoSource:
@@ -44,6 +63,12 @@ class ArxivMatch:
     base_id: str
     arxiv_id: str
     version: int | None
+    raw_match: str
+
+
+@dataclass(slots=True, frozen=True)
+class DoiMatch:
+    doi: str
     raw_match: str
 
 
@@ -67,6 +92,24 @@ class AwesomeSeedRecord:
         }
 
 
+@dataclass(slots=True, frozen=True)
+class AwesomeDoiSeedRecord:
+    doi: str
+    source_repo: str
+    source_url: str
+    found_in: str
+    raw_match: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "doi": self.doi,
+            "source_repo": self.source_repo,
+            "source_url": self.source_url,
+            "found_in": self.found_in,
+            "raw_match": self.raw_match,
+        }
+
+
 @dataclass(slots=True)
 class AwesomeSeedStats:
     repos_processed: int
@@ -75,11 +118,22 @@ class AwesomeSeedStats:
     repo_counts: dict[str, int]
     jsonl_path: Path
     tier_a_seed_path: Path
+    total_doi_matches: int
+    unique_dois: int
+    doi_repo_counts: dict[str, int]
+    doi_jsonl_path: Path
+    tier_a_arxiv_path: Path
+    tier_a_dois_path: Path
 
     def top_repos(self, limit: int = 10) -> list[tuple[str, int]]:
         if limit <= 0:
             return []
         return sorted(self.repo_counts.items(), key=lambda item: (-item[1], item[0]))[:limit]
+
+    def top_doi_repos(self, limit: int = 10) -> list[tuple[str, int]]:
+        if limit <= 0:
+            return []
+        return sorted(self.doi_repo_counts.items(), key=lambda item: (-item[1], item[0]))[:limit]
 
 
 @dataclass(slots=True, frozen=True)
@@ -153,6 +207,27 @@ def _build_arxiv_id(base_id: str, version: int | None) -> str:
     return f"{base_id}v{version}" if version is not None else base_id
 
 
+def normalize_doi(raw: str) -> str:
+    value = raw.strip()
+    lowered = value.casefold()
+    if lowered.startswith("https://doi.org/"):
+        value = value[len("https://doi.org/") :]
+    elif lowered.startswith("http://doi.org/"):
+        value = value[len("http://doi.org/") :]
+    elif lowered.startswith("https://dx.doi.org/"):
+        value = value[len("https://dx.doi.org/") :]
+    elif lowered.startswith("http://dx.doi.org/"):
+        value = value[len("http://dx.doi.org/") :]
+
+    if value.casefold().startswith("doi:"):
+        value = value.split(":", 1)[1]
+
+    value = value.strip()
+    while value and value[-1] in _DOI_TRAILING_CHARS:
+        value = value[:-1]
+    return value.casefold().strip()
+
+
 def extract_arxiv_matches(text: str) -> list[ArxivMatch]:
     if not text:
         return []
@@ -181,6 +256,44 @@ def extract_arxiv_matches(text: str) -> list[ArxivMatch]:
                     ),
                 )
             )
+
+    matches_with_pos.sort(key=lambda item: item[0])
+    return [item[1] for item in matches_with_pos]
+
+
+def _spans_overlap(start: int, end: int, spans: list[tuple[int, int, str]]) -> bool:
+    return any(start < existing_end and end > existing_start for existing_start, existing_end, _ in spans)
+
+
+def extract_doi_matches(text: str) -> list[DoiMatch]:
+    if not text:
+        return []
+
+    matches_with_pos: list[tuple[int, DoiMatch]] = []
+    selected_spans: list[tuple[int, int, str]] = []
+    seen_spans: set[tuple[int, int, str]] = set()
+
+    for pattern in (_DOI_URL_RE, _DOI_PREFIX_RE, _DOI_BARE_RE):
+        for match in pattern.finditer(text):
+            doi = normalize_doi(match.group("doi"))
+            if not doi:
+                continue
+
+            raw_match = match.group(0)
+            while raw_match and raw_match[-1] in _DOI_TRAILING_CHARS:
+                raw_match = raw_match[:-1]
+            if not raw_match:
+                continue
+
+            start, end = match.span("doi")
+            span_key = (start, end, doi)
+            if span_key in seen_spans:
+                continue
+            if _spans_overlap(start, end, selected_spans):
+                continue
+            seen_spans.add(span_key)
+            selected_spans.append(span_key)
+            matches_with_pos.append((start, DoiMatch(doi=doi, raw_match=raw_match)))
 
     matches_with_pos.sort(key=lambda item: item[0])
     return [item[1] for item in matches_with_pos]
@@ -252,6 +365,54 @@ def _fetch_repo_readme(
     return _FetchedContent(text=html_fallback, found_in="GitHub HTML")
 
 
+def _write_lines(path: Path, lines: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as file_handle:
+        if lines:
+            file_handle.write("\n".join(lines))
+            file_handle.write("\n")
+
+
+def write_seed_outputs(
+    *,
+    arxiv_records: list[AwesomeSeedRecord],
+    doi_records: list[AwesomeDoiSeedRecord],
+    out_dir: Path,
+    tier_a_seed_path: Path = DEFAULT_TIER_A_SEED_PATH,
+    tier_a_arxiv_path: Path = DEFAULT_TIER_A_ARXIV_PATH,
+    tier_a_dois_path: Path = DEFAULT_TIER_A_DOIS_PATH,
+) -> tuple[Path, Path, Path, Path, int, int]:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    jsonl_path = out_dir / "awesome_seed.jsonl"
+    doi_jsonl_path = out_dir / "awesome_seed_doi.jsonl"
+
+    with jsonl_path.open("w", encoding="utf-8") as file_handle:
+        for record in arxiv_records:
+            file_handle.write(json.dumps(record.to_dict(), ensure_ascii=False))
+            file_handle.write("\n")
+
+    with doi_jsonl_path.open("w", encoding="utf-8") as file_handle:
+        for record in doi_records:
+            file_handle.write(json.dumps(record.to_dict(), ensure_ascii=False))
+            file_handle.write("\n")
+
+    sorted_arxiv_ids = sorted({record.base_id for record in arxiv_records})
+    sorted_dois = sorted({record.doi for record in doi_records})
+
+    # Backward-compatible output.
+    _write_lines(tier_a_seed_path, sorted_arxiv_ids)
+    _write_lines(tier_a_arxiv_path, sorted_arxiv_ids)
+    _write_lines(tier_a_dois_path, sorted_dois)
+    return (
+        jsonl_path,
+        doi_jsonl_path,
+        tier_a_seed_path,
+        tier_a_arxiv_path,
+        len(sorted_arxiv_ids),
+        len(sorted_dois),
+    )
+
+
 def seed_awesome_sources(
     *,
     sources_path: Path,
@@ -263,26 +424,24 @@ def seed_awesome_sources(
     backoff_cap_seconds: float = 30.0,
     delay_seconds: float = 0.2,
     tier_a_seed_path: Path = DEFAULT_TIER_A_SEED_PATH,
+    tier_a_arxiv_path: Path = DEFAULT_TIER_A_ARXIV_PATH,
+    tier_a_dois_path: Path = DEFAULT_TIER_A_DOIS_PATH,
 ) -> AwesomeSeedStats:
     repo_sources = load_repo_sources(sources_path)
 
-    out_dir.mkdir(parents=True, exist_ok=True)
-    jsonl_path = out_dir / "awesome_seed.jsonl"
-
-    tier_a_seed_path.parent.mkdir(parents=True, exist_ok=True)
-    unique_base_ids: set[str] = set()
+    arxiv_records: list[AwesomeSeedRecord] = []
+    doi_records: list[AwesomeDoiSeedRecord] = []
     repo_counts: Counter[str] = Counter()
+    doi_repo_counts: Counter[str] = Counter()
     total_matches = 0
+    total_doi_matches = 0
 
     headers = {
         "User-Agent": user_agent,
         "Accept": "text/plain, text/markdown;q=0.9, text/html;q=0.8",
     }
 
-    with (
-        httpx.Client(timeout=timeout_seconds, headers=headers, follow_redirects=True) as client,
-        jsonl_path.open("w", encoding="utf-8") as jsonl_file,
-    ):
+    with httpx.Client(timeout=timeout_seconds, headers=headers, follow_redirects=True) as client:
         for repo_source in repo_sources:
             fetched = _fetch_repo_readme(
                 client=client,
@@ -296,38 +455,68 @@ def seed_awesome_sources(
                     time.sleep(delay_seconds)
                 continue
 
-            matches = extract_arxiv_matches(fetched.text)
-            if matches:
-                repo_counts[repo_source.repo] += len(matches)
+            arxiv_matches = extract_arxiv_matches(fetched.text)
+            doi_matches = extract_doi_matches(fetched.text)
+            if arxiv_matches:
+                repo_counts[repo_source.repo] += len(arxiv_matches)
+            if doi_matches:
+                doi_repo_counts[repo_source.repo] += len(doi_matches)
 
-            for match in matches:
-                unique_base_ids.add(match.base_id)
+            for match in arxiv_matches:
                 total_matches += 1
-                record = AwesomeSeedRecord(
-                    base_id=match.base_id,
-                    arxiv_id=match.arxiv_id,
-                    source_repo=repo_source.repo,
-                    source_url=repo_source.source_url,
-                    found_in=fetched.found_in,
-                    raw_match=match.raw_match,
+                arxiv_records.append(
+                    AwesomeSeedRecord(
+                        base_id=match.base_id,
+                        arxiv_id=match.arxiv_id,
+                        source_repo=repo_source.repo,
+                        source_url=repo_source.source_url,
+                        found_in=fetched.found_in,
+                        raw_match=match.raw_match,
+                    )
                 )
-                jsonl_file.write(json.dumps(record.to_dict(), ensure_ascii=False))
-                jsonl_file.write("\n")
+
+            for match in doi_matches:
+                total_doi_matches += 1
+                doi_records.append(
+                    AwesomeDoiSeedRecord(
+                        doi=match.doi,
+                        source_repo=repo_source.repo,
+                        source_url=repo_source.source_url,
+                        found_in=fetched.found_in,
+                        raw_match=match.raw_match,
+                    )
+                )
 
             if delay_seconds > 0:
                 time.sleep(delay_seconds)
 
-    sorted_ids = sorted(unique_base_ids)
-    with tier_a_seed_path.open("w", encoding="utf-8") as tier_file:
-        if sorted_ids:
-            tier_file.write("\n".join(sorted_ids))
-            tier_file.write("\n")
+    (
+        jsonl_path,
+        doi_jsonl_path,
+        tier_a_seed_written_path,
+        tier_a_arxiv_written_path,
+        unique_arxiv_count,
+        unique_doi_count,
+    ) = write_seed_outputs(
+        arxiv_records=arxiv_records,
+        doi_records=doi_records,
+        out_dir=out_dir,
+        tier_a_seed_path=tier_a_seed_path,
+        tier_a_arxiv_path=tier_a_arxiv_path,
+        tier_a_dois_path=tier_a_dois_path,
+    )
 
     return AwesomeSeedStats(
         repos_processed=len(repo_sources),
         total_matches=total_matches,
-        unique_ids=len(unique_base_ids),
+        unique_ids=unique_arxiv_count,
         repo_counts=dict(repo_counts),
         jsonl_path=jsonl_path,
-        tier_a_seed_path=tier_a_seed_path,
+        tier_a_seed_path=tier_a_seed_written_path,
+        total_doi_matches=total_doi_matches,
+        unique_dois=unique_doi_count,
+        doi_repo_counts=dict(doi_repo_counts),
+        doi_jsonl_path=doi_jsonl_path,
+        tier_a_arxiv_path=tier_a_arxiv_written_path,
+        tier_a_dois_path=tier_a_dois_path,
     )

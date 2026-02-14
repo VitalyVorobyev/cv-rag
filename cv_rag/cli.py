@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import logging
+import os
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,6 +32,10 @@ from cv_rag.embeddings import OllamaEmbedClient
 from cv_rag.exceptions import GenerationError
 from cv_rag.ingest import IngestPipeline
 from cv_rag.llm import mlx_generate
+from cv_rag.openalex_resolve import (
+    DEFAULT_TIER_A_OPENALEX_URLS_PATH,
+    resolve_dois_openalex,
+)
 from cv_rag.prompts_answer import (
     build_prompt as build_mode_answer_prompt,
 )
@@ -53,7 +59,11 @@ from cv_rag.routing import (
     route as route_answer_mode,
 )
 from cv_rag.s2_client import SemanticScholarClient
-from cv_rag.seed_awesome import seed_awesome_sources
+from cv_rag.seed_awesome import (
+    DEFAULT_TIER_A_ARXIV_PATH,
+    DEFAULT_TIER_A_DOIS_PATH,
+    seed_awesome_sources,
+)
 from cv_rag.sqlite_store import SQLiteStore
 
 logger = logging.getLogger(__name__)
@@ -188,6 +198,49 @@ def _run_ingest(
     console.print(f"Qdrant collection: {settings.qdrant_collection}")
 
 
+def _load_arxiv_ids_from_jsonl(
+    jsonl_path: Path,
+    *,
+    preferred_fields: tuple[str, ...] = ("arxiv_id", "base_id"),
+) -> tuple[list[str], int]:
+    if not jsonl_path.exists():
+        raise FileNotFoundError(f"JSONL file not found: {jsonl_path}")
+
+    ids: list[str] = []
+    seen: set[str] = set()
+    skipped_records = 0
+
+    for line_no, raw_line in enumerate(jsonl_path.read_text(encoding="utf-8").splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"{jsonl_path}:{line_no}: invalid JSON ({exc})") from exc
+
+        value: str | None = None
+        if isinstance(payload, dict):
+            for field in preferred_fields:
+                candidate = payload.get(field)
+                if isinstance(candidate, str) and candidate.strip():
+                    value = candidate.strip()
+                    break
+        elif isinstance(payload, str) and payload.strip():
+            value = payload.strip()
+
+        if not value:
+            skipped_records += 1
+            continue
+
+        if value in seen:
+            continue
+        seen.add(value)
+        ids.append(value)
+
+    return ids, skipped_records
+
+
 @app.command()
 def ingest(
     limit: int = typer.Option(
@@ -306,6 +359,71 @@ def ingest_ids(
     )
 
 
+@app.command("ingest-jsonl")
+def ingest_jsonl(
+    source: Path = typer.Option(
+        ...,
+        "--source",
+        help="Path to JSONL file containing arXiv IDs (e.g., awesome_seed.jsonl).",
+    ),
+    limit: int | None = typer.Option(
+        None,
+        "--limit",
+        help="Optional maximum number of IDs to ingest from the JSONL file.",
+    ),
+    force_grobid: bool = typer.Option(
+        False,
+        help="Re-run GROBID parsing even when TEI already exists.",
+    ),
+    embed_batch_size: int = typer.Option(
+        None,
+        help="Embedding batch size override.",
+    ),
+) -> None:
+    settings = get_settings()
+    settings.ensure_directories()
+
+    try:
+        ids, skipped_records = _load_arxiv_ids_from_jsonl(source)
+    except (OSError, ValueError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+
+    if limit is not None:
+        if limit <= 0:
+            console.print("[red]--limit must be > 0 when provided.[/red]")
+            raise typer.Exit(code=1)
+        ids = ids[:limit]
+
+    if not ids:
+        console.print(f"[yellow]No valid arXiv IDs found in JSONL: {source}[/yellow]")
+        raise typer.Exit(code=1)
+
+    console.print(
+        f"[bold]Fetching metadata for arXiv IDs from JSONL ({len(ids)} IDs, skipped={skipped_records})...[/bold]"
+    )
+    papers = fetch_papers_by_ids(
+        ids=ids,
+        arxiv_api_url=settings.arxiv_api_url,
+        timeout_seconds=settings.http_timeout_seconds,
+        user_agent=settings.user_agent,
+        max_retries=settings.arxiv_max_retries,
+        backoff_start_seconds=settings.arxiv_backoff_start_seconds,
+        backoff_cap_seconds=settings.arxiv_backoff_cap_seconds,
+    )
+    if not papers:
+        console.print("[yellow]No valid arXiv IDs provided.[/yellow]")
+        raise typer.Exit(code=1)
+
+    metadata_path = settings.metadata_dir / f"{source.stem}_selected_ids.json"
+    _run_ingest(
+        papers=papers,
+        metadata_json_path=metadata_path,
+        force_grobid=force_grobid,
+        embed_batch_size=embed_batch_size,
+    )
+
+
 @app.command()
 def curate(
     refresh_days: int = typer.Option(
@@ -400,18 +518,12 @@ def curate(
     console.print(f"Tier distribution: {tier_counts}")
 
 
-@seed_app.command("awesome")
-def seed_awesome(
-    sources: Path = typer.Option(
-        ...,
-        "--sources",
-        help="Path to GitHub repo list (owner/repo or full GitHub URL).",
-    ),
-    out_dir: Path = typer.Option(
-        Path("data/curation/seeds"),
-        "--out-dir",
-        help="Output directory for awesome_seed.jsonl.",
-    ),
+def _run_seed_awesome_command(
+    *,
+    sources: Path,
+    out_dir: Path,
+    tier_a_arxiv: Path,
+    tier_a_dois: Path,
 ) -> None:
     settings = get_settings()
 
@@ -425,6 +537,8 @@ def seed_awesome(
             backoff_start_seconds=max(0.5, settings.arxiv_backoff_start_seconds / 2),
             backoff_cap_seconds=settings.arxiv_backoff_cap_seconds,
             delay_seconds=0.2,
+            tier_a_arxiv_path=tier_a_arxiv,
+            tier_a_dois_path=tier_a_dois,
         )
     except (OSError, ValueError, RuntimeError) as exc:
         console.print(f"[red]{exc}[/red]")
@@ -432,19 +546,161 @@ def seed_awesome(
 
     console.print("\n[bold green]Awesome seeding complete[/bold green]")
     console.print(f"Repos processed: {stats.repos_processed}")
-    console.print(f"Total matches: {stats.total_matches}")
-    console.print(f"Unique IDs: {stats.unique_ids}")
-    console.print(f"JSONL output: {stats.jsonl_path}")
-    console.print(f"Tier-A output: {stats.tier_a_seed_path}")
+    console.print(f"Total arXiv matches: {stats.total_matches}")
+    console.print(f"Unique arXiv IDs: {stats.unique_ids}")
+    console.print(f"Total DOI matches: {stats.total_doi_matches}")
+    console.print(f"Unique DOIs: {stats.unique_dois}")
+    console.print(f"arXiv JSONL output: {stats.jsonl_path}")
+    console.print(f"DOI JSONL output: {stats.doi_jsonl_path}")
+    console.print(f"Tier-A arXiv (legacy): {stats.tier_a_seed_path}")
+    console.print(f"Tier-A arXiv: {stats.tier_a_arxiv_path}")
+    console.print(f"Tier-A DOIs: {stats.tier_a_dois_path}")
 
     top_repos = stats.top_repos(limit=10)
     if top_repos:
-        table = Table(title="Top Repos by Match Count")
+        table = Table(title="Top Repos by arXiv Match Count")
         table.add_column("Repo")
         table.add_column("Matches", justify="right")
         for repo, count in top_repos:
             table.add_row(repo, str(count))
         console.print(table)
+
+    top_doi_repos = stats.top_doi_repos(limit=10)
+    if top_doi_repos:
+        table = Table(title="Top Repos by DOI Match Count")
+        table.add_column("Repo")
+        table.add_column("Matches", justify="right")
+        for repo, count in top_doi_repos:
+            table.add_row(repo, str(count))
+        console.print(table)
+
+
+@seed_app.command("awesome")
+def seed_awesome(
+    sources: Path = typer.Option(
+        ...,
+        "--sources",
+        help="Path to GitHub repo list (owner/repo or full GitHub URL).",
+    ),
+    out_dir: Path = typer.Option(
+        Path("data/curation/seeds"),
+        "--out-dir",
+        help="Output directory for awesome_seed.jsonl and awesome_seed_doi.jsonl.",
+    ),
+    tier_a_arxiv: Path = typer.Option(
+        DEFAULT_TIER_A_ARXIV_PATH,
+        "--tierA-arxiv",
+        help="Path for unique arXiv base-id seed file.",
+    ),
+    tier_a_dois: Path = typer.Option(
+        DEFAULT_TIER_A_DOIS_PATH,
+        "--tierA-dois",
+        help="Path for unique DOI seed file.",
+    ),
+) -> None:
+    _run_seed_awesome_command(
+        sources=sources,
+        out_dir=out_dir,
+        tier_a_arxiv=tier_a_arxiv,
+        tier_a_dois=tier_a_dois,
+    )
+
+
+@app.command("seed-awesome")
+def seed_awesome_root(
+    sources: Path = typer.Option(
+        ...,
+        "--sources",
+        help="Path to GitHub repo list (owner/repo or full GitHub URL).",
+    ),
+    out_dir: Path = typer.Option(
+        Path("data/curation/seeds"),
+        "--out-dir",
+        help="Output directory for awesome_seed.jsonl and awesome_seed_doi.jsonl.",
+    ),
+    tier_a_arxiv: Path = typer.Option(
+        DEFAULT_TIER_A_ARXIV_PATH,
+        "--tierA-arxiv",
+        help="Path for unique arXiv base-id seed file.",
+    ),
+    tier_a_dois: Path = typer.Option(
+        DEFAULT_TIER_A_DOIS_PATH,
+        "--tierA-dois",
+        help="Path for unique DOI seed file.",
+    ),
+) -> None:
+    _run_seed_awesome_command(
+        sources=sources,
+        out_dir=out_dir,
+        tier_a_arxiv=tier_a_arxiv,
+        tier_a_dois=tier_a_dois,
+    )
+
+
+@app.command("resolve-dois")
+def resolve_dois(
+    dois: Path = typer.Option(
+        DEFAULT_TIER_A_DOIS_PATH,
+        "--dois",
+        help="Path to DOI seed file (one DOI per line).",
+    ),
+    out_dir: Path = typer.Option(
+        Path("data/curation"),
+        "--out-dir",
+        help="Output directory for openalex_resolved.jsonl and cache.",
+    ),
+    user_agent: str | None = typer.Option(
+        None,
+        "--user-agent",
+        help="User-Agent string for OpenAlex requests. Defaults to CV_RAG_USER_AGENT.",
+    ),
+    api_key_env: str = typer.Option(
+        "OPENALEX_API_KEY",
+        "--api-key-env",
+        help="Environment variable name containing the OpenAlex API key.",
+    ),
+    tier_a_urls: Path = typer.Option(
+        DEFAULT_TIER_A_OPENALEX_URLS_PATH,
+        "--tierA-urls",
+        help="Path to write resolved OpenAlex OA PDF URLs.",
+    ),
+    email: str | None = typer.Option(
+        None,
+        "--email",
+        help="Optional contact email appended to User-Agent as mailto.",
+    ),
+) -> None:
+    settings = get_settings()
+    resolved_user_agent = (user_agent or settings.user_agent).strip()
+    api_key = os.getenv(api_key_env)
+
+    try:
+        stats = resolve_dois_openalex(
+            dois_path=dois,
+            out_dir=out_dir,
+            user_agent=resolved_user_agent,
+            email=email,
+            api_key=api_key,
+            timeout_seconds=settings.http_timeout_seconds,
+            max_retries=settings.arxiv_max_retries,
+            backoff_start_seconds=max(0.5, settings.arxiv_backoff_start_seconds / 2),
+            backoff_cap_seconds=settings.arxiv_backoff_cap_seconds,
+            delay_seconds=0.2,
+            tier_a_urls_path=tier_a_urls,
+        )
+    except (OSError, ValueError, RuntimeError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+
+    console.print("\n[bold green]OpenAlex DOI resolution complete[/bold green]")
+    console.print(f"DOIs processed: {stats.dois_processed}")
+    console.print(f"Resolved records: {stats.resolved_records}")
+    console.print(f"Resolved OA PDF URLs: {stats.resolved_pdf_urls}")
+    console.print(f"Unresolved: {stats.unresolved}")
+    console.print(f"Cache hits: {stats.cache_hits}")
+    console.print(f"Resolved JSONL output: {stats.jsonl_path}")
+    console.print(f"Tier-A OA URL output: {stats.tier_a_urls_path}")
+    console.print(f"Cache directory: {stats.cache_dir}")
 
 
 @app.command()

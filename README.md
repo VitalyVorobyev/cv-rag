@@ -28,9 +28,10 @@ A local-first Retrieval-Augmented Generation (RAG) system for computer-vision pa
 **Query / Answer**
 
 1. hybrid retrieve: SQLite keyword + Qdrant vector
-2. build prompt with `[S1..Sk]` excerpts + citation rules
-3. generate answer with MLX LLM
-4. validate citations (and repair if needed)
+2. cheap prelim retrieval + answer routing (`single|compare|survey|implement|evidence`)
+3. build mode-specific prompt with `[S1..Sk]` excerpts + citation rules
+4. generate answer with MLX LLM
+5. validate citations (and repair if needed)
 
 ---
 
@@ -114,6 +115,16 @@ uv run cv-rag ingest -n 50 --no-skip-ingested
 uv run cv-rag ingest-ids 2104.00680 1911.11763
 ```
 
+### Ingest papers from JSONL seed files
+
+```bash
+# Works with records that contain arxiv_id or base_id
+uv run cv-rag ingest-jsonl --source data/curation/awesome_seed.jsonl
+
+# Optional cap for quick batches
+uv run cv-rag ingest-jsonl --source data/curation/awesome_seed.jsonl --limit 200
+```
+
 ### Inspect retrieval
 
 ```bash
@@ -125,14 +136,66 @@ uv run cv-rag query "SuperGlue loss negative log-likelihood dustbin Sinkhorn" --
 ```bash
 uv run cv-rag answer \
   "Summarize the key idea and training objective of LoFTR. Compare with SuperGlue." \
-  --k 10 \
-  --max-per-doc 8 \
-  --section-boost 0.2 \
+  --mode auto \
+  --router-strategy hybrid \
+  --router-top-k 12 \
+  --k 12 \
+  --max-per-doc 4 \
+  --section-boost 0.1 \
   --temperature 0.1 \
   --top-p 0.9 \
   --model mlx-community/Qwen2.5-7B-Instruct-4bit \
   --show-sources
 ```
+
+`answer` supports explicit mode override:
+
+```bash
+uv run cv-rag answer "Compare LoFTR and SuperGlue" --mode compare --model mlx-community/Qwen2.5-7B-Instruct-4bit
+```
+
+Modes: `auto`, `single`, `compare`, `survey`, `implement`, `evidence`.
+In `auto`, routing runs after a cheap retrieval pass and may downgrade compare requests if cross-paper evidence is too sparse.
+
+### Seed from awesome lists + resolve OA PDFs
+
+```bash
+# Extract arXiv IDs + DOIs from GitHub awesome lists
+uv run cv-rag seed-awesome \
+  --sources data/curation/awesome_sources.txt \
+  --out-dir data/curation
+
+# Equivalent nested command
+uv run cv-rag seed awesome \
+  --sources data/curation/awesome_sources.txt \
+  --out-dir data/curation
+
+# Resolve DOI seeds to Open Access PDF URLs via OpenAlex
+export OPENALEX_API_KEY=...   # optional but recommended
+uv run cv-rag resolve-dois \
+  --dois data/curation/tierA_dois.txt \
+  --out-dir data/curation
+```
+
+Seeding outputs:
+
+* `data/curation/awesome_seed.jsonl` (arXiv provenance)
+* `data/curation/awesome_seed_doi.jsonl` (DOI provenance)
+* `data/curation/tierA_seed.txt` (legacy arXiv IDs, kept for compatibility)
+* `data/curation/tierA_arxiv.txt` (preferred arXiv IDs)
+* `data/curation/tierA_dois.txt` (DOI seeds)
+
+You can ingest the arXiv seed JSONL directly with:
+
+```bash
+uv run cv-rag ingest-jsonl --source data/curation/awesome_seed.jsonl
+```
+
+OpenAlex resolution outputs:
+
+* `data/curation/openalex_resolved.jsonl`
+* `data/curation/tierA_urls_openalex.txt`
+* `data/curation/openalex_cache/` (response cache)
 
 ### Curate corpus tiers (Semantic Scholar metadata)
 
@@ -175,6 +238,9 @@ Config lives in `cv_rag/config.py`. Typical knobs:
 * Retrieval:
 
   * `--k`, `--max-per-doc`, `--section-boost`
+  * `answer` routing: `--mode`, `--router-model`, `--router-strategy`, `--router-top-k`
+* OpenAlex:
+  * `OPENALEX_API_KEY` (optional; command fails fast on auth-required responses)
 
 ---
 
@@ -185,6 +251,15 @@ data/
   pdfs/       # downloaded arXiv PDFs
   tei/        # GROBID TEI XML outputs
   metadata/   # arXiv metadata snapshots
+  curation/
+    awesome_seed.jsonl
+    awesome_seed_doi.jsonl
+    tierA_seed.txt         # legacy arXiv seed file
+    tierA_arxiv.txt        # preferred arXiv seed file
+    tierA_dois.txt         # DOI seed file
+    openalex_resolved.jsonl
+    tierA_urls_openalex.txt
+    openalex_cache/
   venues_tier0.txt  # whitelist for top-tier venue bonus/tiering
 qdrant_storage/  # Qdrant persistent volume
 ```

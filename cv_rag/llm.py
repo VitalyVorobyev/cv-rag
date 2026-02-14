@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import sys
 
 from cv_rag.exceptions import GenerationError
 
@@ -17,12 +18,15 @@ def mlx_generate(
     top_p: float,
     seed: int | None = None,
 ) -> str:
-    """Run mlx_lm.generate subprocess and return the generated text.
+    """Run MLX generation subprocess and return the generated text.
 
     Raises GenerationError on failure (not found, non-zero exit, empty output).
     """
     command = [
-        "mlx_lm.generate",
+        sys.executable,
+        "-m",
+        "mlx_lm",
+        "generate",
         "--model",
         model,
         "--prompt",
@@ -47,7 +51,7 @@ def mlx_generate(
             text=True,
         )
     except FileNotFoundError:
-        raise GenerationError("`mlx_lm.generate` was not found in PATH.") from None
+        raise GenerationError("Python runtime for MLX generation was not found in PATH.") from None
 
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip()

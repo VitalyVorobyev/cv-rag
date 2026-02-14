@@ -18,8 +18,12 @@ docker compose up -d
 # Run CLI commands
 uv run cv-rag ingest --limit 10
 uv run cv-rag ingest-ids 2104.00680 1911.11763
+uv run cv-rag ingest-jsonl --source data/curation/awesome_seed.jsonl
 uv run cv-rag query "vision transformers"
-uv run cv-rag answer "vision transformers" --model <mlx-model-path>
+uv run cv-rag answer "vision transformers" --mode auto --model <mlx-model-path>
+uv run cv-rag seed-awesome --sources data/curation/awesome_sources.txt --out-dir data/curation
+uv run cv-rag seed awesome --sources data/curation/awesome_sources.txt --out-dir data/curation
+uv run cv-rag resolve-dois --dois data/curation/tierA_dois.txt --out-dir data/curation
 uv run cv-rag doctor
 uv run cv-rag curate --refresh-days 30
 
@@ -55,7 +59,11 @@ cv_rag/
     exceptions.py     # Exception hierarchy: CvRagError → IngestError, RetrievalError, GenerationError, CitationValidationError
     http_retry.py     # Shared HTTP retry with exponential backoff (used by arxiv_sync, grobid_client)
     llm.py            # MLX subprocess wrapper (mlx_generate), raises GenerationError
-    answer.py         # Answer orchestration: prompts, citation validation, comparison detection, chunk merging
+    answer.py         # Answer utilities: citation validation, comparison coverage checks, retrieval merge helpers
+    prompts_answer.py # Mode-specific answer prompt templates and repair prompts
+    routing.py        # Rule/LLM answer router + retrieval distribution post-checks
+    seed_awesome.py   # GitHub awesome-list seeding (arXiv + DOI extraction)
+    openalex_resolve.py  # DOI -> OA PDF URL resolver via OpenAlex (+ cache)
     ingest.py         # IngestPipeline: download → parse → chunk → embed → store
     arxiv_sync.py     # ArXiv API feed fetching + PDF download
     grobid_client.py  # GROBID PDF→TEI XML
@@ -87,8 +95,9 @@ ArXiv API → `arxiv_sync.py` (fetch metadata + PDFs) → `grobid_client.py` (PD
 
 ### Relevance & Answer Safeguards
 - **Relevance guard**: Extracts rare query terms (5+ chars, digits); raises `NoRelevantSourcesError` if no term overlap and vector scores below threshold (`relevance_vector_threshold` in Settings, default 0.45).
-- **Comparison guard**: Detects comparison queries via regex; refuses if fewer than 2 sources from each of the top 2 papers.
-- **Citation enforcement**: Checks generated answers for `[S1][S3]`-style citations; re-prompts if missing. Validation logic in `answer.py`.
+- **Answer routing**: `answer` uses a cheap prelim retrieval pass, then routes to `single|compare|survey|implement|evidence` via rules/LLM/hybrid (`routing.py`).
+- **Comparison guard**: Applied when routed mode is compare; refuses if fewer than 2 sources from each of the top 2 papers.
+- **Citation enforcement**: Generated answers must include `[S#]` citations; CLI runs validation + repair loop (`answer.py`, `prompts_answer.py`).
 
 ### Key Patterns
 - **HTTP retry**: All external HTTP calls use `http_retry.http_request_with_retry()` with exponential backoff. GROBID uses `prepare_kwargs` callback to re-open file handles per attempt.
@@ -101,6 +110,7 @@ All settings in `config.py` via environment variables prefixed `CV_RAG_`. Key on
 - `CV_RAG_QDRANT_URL` (default: localhost:6333), `CV_RAG_GROBID_URL` (localhost:8070), `CV_RAG_OLLAMA_URL` (localhost:11434)
 - `CV_RAG_CHUNK_MAX_CHARS` (1200), `CV_RAG_CHUNK_OVERLAP` (200)
 - Storage paths: `CV_RAG_DATA_DIR`, `CV_RAG_PDF_DIR`, `CV_RAG_TEI_DIR`, `CV_RAG_METADATA_DIR`
+- OpenAlex: `OPENALEX_API_KEY` (optional; resolver fails fast on auth-required responses)
 
 ## External Services
 

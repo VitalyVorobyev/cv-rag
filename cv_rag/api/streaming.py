@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from collections.abc import Generator
 
 from cv_rag.exceptions import GenerationError
@@ -22,13 +23,22 @@ def mlx_generate_stream(
     streaming is not available (MLX may buffer stdout).
     """
     command = [
-        "mlx_lm.generate",
-        "--model", model,
-        "--prompt", prompt,
-        "--max-tokens", str(max_tokens),
-        "--temp", str(temperature),
-        "--top-p", str(top_p),
-        "--verbose", "False",
+        sys.executable,
+        "-m",
+        "mlx_lm",
+        "generate",
+        "--model",
+        model,
+        "--prompt",
+        prompt,
+        "--max-tokens",
+        str(max_tokens),
+        "--temp",
+        str(temperature),
+        "--top-p",
+        str(top_p),
+        "--verbose",
+        "False",
     ]
     if seed is not None:
         command.extend(["--seed", str(seed)])
@@ -42,7 +52,7 @@ def mlx_generate_stream(
             bufsize=1,
         )
     except FileNotFoundError:
-        raise GenerationError("`mlx_lm.generate` was not found in PATH.") from None
+        raise GenerationError("Python runtime for MLX generation was not found in PATH.") from None
 
     assert process.stdout is not None
 
