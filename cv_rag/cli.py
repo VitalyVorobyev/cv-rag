@@ -40,11 +40,14 @@ from cv_rag.retrieve import (
     format_citation,
 )
 from cv_rag.s2_client import SemanticScholarClient
+from cv_rag.seed_awesome import seed_awesome_sources
 from cv_rag.sqlite_store import SQLiteStore
 
 logger = logging.getLogger(__name__)
 
 app = typer.Typer(help="Local CV papers RAG MVP")
+seed_app = typer.Typer(help="Seed curation files from external sources.")
+app.add_typer(seed_app, name="seed")
 console = Console()
 
 
@@ -382,6 +385,53 @@ def curate(
     console.print(f"Updated: {result.updated}")
     console.print(f"Skipped: {result.skipped}")
     console.print(f"Tier distribution: {tier_counts}")
+
+
+@seed_app.command("awesome")
+def seed_awesome(
+    sources: Path = typer.Option(
+        ...,
+        "--sources",
+        help="Path to GitHub repo list (owner/repo or full GitHub URL).",
+    ),
+    out_dir: Path = typer.Option(
+        Path("data/curation/seeds"),
+        "--out-dir",
+        help="Output directory for awesome_seed.jsonl.",
+    ),
+) -> None:
+    settings = get_settings()
+
+    try:
+        stats = seed_awesome_sources(
+            sources_path=sources,
+            out_dir=out_dir,
+            user_agent=settings.user_agent,
+            timeout_seconds=settings.http_timeout_seconds,
+            max_retries=settings.arxiv_max_retries,
+            backoff_start_seconds=max(0.5, settings.arxiv_backoff_start_seconds / 2),
+            backoff_cap_seconds=settings.arxiv_backoff_cap_seconds,
+            delay_seconds=0.2,
+        )
+    except (OSError, ValueError, RuntimeError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+
+    console.print("\n[bold green]Awesome seeding complete[/bold green]")
+    console.print(f"Repos processed: {stats.repos_processed}")
+    console.print(f"Total matches: {stats.total_matches}")
+    console.print(f"Unique IDs: {stats.unique_ids}")
+    console.print(f"JSONL output: {stats.jsonl_path}")
+    console.print(f"Tier-A output: {stats.tier_a_seed_path}")
+
+    top_repos = stats.top_repos(limit=10)
+    if top_repos:
+        table = Table(title="Top Repos by Match Count")
+        table.add_column("Repo")
+        table.add_column("Matches", justify="right")
+        for repo, count in top_repos:
+            table.add_row(repo, str(count))
+        console.print(table)
 
 
 @app.command()
