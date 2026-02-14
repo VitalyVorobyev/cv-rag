@@ -23,10 +23,12 @@ class RetrievedChunk:
 
 
 QUERY_TOKEN_RE = re.compile(r"[a-z0-9]+")
+QUESTION_ALNUM_RE = re.compile(r"[A-Za-z0-9]+")
 SECTION_PRIORITY_RE = re.compile(
     r"(method|approach|supervision|loss|training|optimal matching)",
     re.IGNORECASE,
 )
+ENTITY_TOKEN_WHITELIST = {"loftr", "superglue"}
 COMMON_QUERY_TERMS = {
     "about",
     "against",
@@ -67,6 +69,46 @@ class NoRelevantSourcesError(RuntimeError):
 def format_citation(arxiv_id: str, section_title: str) -> str:
     section = section_title.strip() or "Untitled"
     return f"arXiv:{arxiv_id} §{section}"
+
+
+def _is_camel_caseish(token: str) -> bool:
+    return any(char.isupper() for char in token) and any(char.islower() for char in token)
+
+
+def extract_entity_like_tokens(question: str) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for match in QUESTION_ALNUM_RE.finditer(question):
+        raw = match.group(0)
+        lower = raw.lower()
+        include = False
+        if len(lower) >= 5:
+            include = True
+        if any(char.isdigit() for char in raw):
+            include = True
+        if _is_camel_caseish(raw):
+            include = True
+        if lower in ENTITY_TOKEN_WHITELIST:
+            include = True
+        if not include:
+            continue
+        if lower in seen:
+            continue
+        seen.add(lower)
+        out.append(lower)
+    return out
+
+
+def filter_chunks_by_entity_tokens(chunks: list[RetrievedChunk], entity_tokens: list[str]) -> list[RetrievedChunk]:
+    if not entity_tokens:
+        return chunks
+    token_patterns = [re.compile(rf"\b{re.escape(token)}\b", re.IGNORECASE) for token in entity_tokens]
+    filtered: list[RetrievedChunk] = []
+    for chunk in chunks:
+        haystack = f"{chunk.title}\n{chunk.section_title}\n{chunk.text}"
+        if any(pattern.search(haystack) for pattern in token_patterns):
+            filtered.append(chunk)
+    return filtered
 
 
 class HybridRetriever:
@@ -228,7 +270,7 @@ class HybridRetriever:
         return (not overlap_found) and (max_vector < vector_score_threshold)
 
 
-def build_answer_prompt(query: str, chunks: list[RetrievedChunk]) -> str:
+def build_query_prompt(query: str, chunks: list[RetrievedChunk]) -> str:
     lines: list[str] = []
     lines.append("You are answering a computer vision research question using paper excerpts.")
     lines.append("Use only the provided context. If context is insufficient, say so.")
@@ -269,10 +311,26 @@ def build_strict_answer_prompt(question: str, chunks: list[RetrievedChunk]) -> s
 
     lines.append("Rules:")
     lines.append("1. Only use information supported by the sources.")
-    lines.append("2. Every non-trivial claim must include inline citations like [S3][S7].")
-    lines.append("3. If sources are insufficient, state what is missing and ask one clarifying question.")
-    lines.append("4. Prefer comparisons and what each paper claims or shows.")
-    lines.append("5. Do not fabricate details, metrics, or citations.")
+    lines.append("2. Every sentence must include one or more inline citations like [S3] or [S3][S7].")
+    lines.append("3. Every paragraph must include at least one inline citation [S#].")
+    lines.append("4. The first paragraph must end with at least one citation.")
+    lines.append("5. If sources are insufficient, state what is missing and ask one clarifying question.")
+    lines.append("6. Prefer comparisons and what each paper claims or shows.")
+    lines.append("7. Never cite a source outside S1..Sk. Never cite unrelated sources.")
+    lines.append("8. Do not add a separate 'Citations' footer.")
+    lines.append("9. Do not fabricate details, metrics, or citations.")
+    lines.append("10. Use paper-accurate terminology.")
     lines.append("")
+    lines.append("Output format (MANDATORY):")
+    lines.append("Write EXACTLY 4 paragraphs labeled P1..P4, no headings, no bullet lists.")
+    lines.append("Each paragraph must have 2 sentences.")
+    lines.append("EVERY sentence must end with one or more citations like [S1] or [S1][S2].")
+    lines.append("Do not output any text before P1.")
+    lines.append("")
+    lines.append("Template (follow exactly):")
+    lines.append("P1: <2 sentences> [S#]")
+    lines.append("P2: <2 sentences> [S#]")
+    lines.append("P3: <2 sentences> [S#]")
+    lines.append("P4: <2 sentences> [S#]")
     lines.append("Answer:")
     return "\n".join(lines)

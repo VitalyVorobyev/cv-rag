@@ -1,0 +1,35 @@
+- question: "Explain LoFTR vs SuperGlue and when each fails."
+  must_include_arxiv_ids:
+    - "2104.00680"
+    - "1911.11763"
+  must_include_tokens:
+    - "loftr"
+  min_sources: 6
+
+- question: "What is the key idea of DETR and why does bipartite matching matter?"
+  must_include_arxiv_ids:
+    - "2005.12872"
+  must_include_tokens:
+    - "bipartite"
+  min_sources: 6
+
+- question: "Summarize Vision Transformer patch embedding and training setup."
+  must_include_arxiv_ids:
+    - "2010.11929"
+  must_include_tokens:
+    - "patch"
+  min_sources: 6
+
+- question: "How does CLIP train image-text alignment with contrastive learning?"
+  must_include_arxiv_ids:
+    - "2103.00020"
+  must_include_tokens:
+    - "contrastive"
+  min_sources: 6
+
+- question: "What does Segment Anything claim about promptable segmentation?"
+  must_include_arxiv_ids:
+    - "2304.02643"
+  must_include_tokens:
+    - "prompt"
+  min_sources: 6

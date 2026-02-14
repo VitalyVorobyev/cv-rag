@@ -118,7 +118,8 @@ def _extract_rss_authors(entry: Any) -> list[str]:
 
 
 def _fetch_arxiv_api_feed(
-    limit: int,
+    start: int,
+    max_results: int,
     arxiv_api_url: str,
     timeout_seconds: float,
     user_agent: str,
@@ -130,8 +131,8 @@ def _fetch_arxiv_api_feed(
         "search_query": "cat:cs.CV",
         "sortBy": "submittedDate",
         "sortOrder": "descending",
-        "start": 0,
-        "max_results": limit,
+        "start": start,
+        "max_results": max_results,
     }
     headers = {"User-Agent": user_agent}
     attempts = max(1, max_retries)
@@ -289,6 +290,42 @@ def _parse_rss_feed(feed_text: str, limit: int) -> list[PaperMetadata]:
     return papers
 
 
+def _append_filtered_papers(
+    *,
+    candidates: list[PaperMetadata],
+    selected: list[PaperMetadata],
+    selected_limit: int,
+    skip_versions: set[str],
+    seen_versions: set[str],
+    scan_budget: int,
+) -> tuple[int, int]:
+    scanned = 0
+    skipped = 0
+    if scan_budget <= 0:
+        return scanned, skipped
+
+    for paper in candidates:
+        if scanned >= scan_budget or len(selected) >= selected_limit:
+            break
+        scanned += 1
+
+        versioned = paper.arxiv_id_with_version.strip()
+        if versioned:
+            if versioned in seen_versions:
+                continue
+            seen_versions.add(versioned)
+            if versioned in skip_versions:
+                skipped += 1
+                continue
+        elif "" in skip_versions:
+            skipped += 1
+            continue
+
+        selected.append(paper)
+
+    return scanned, skipped
+
+
 def fetch_cs_cv_papers(
     limit: int,
     arxiv_api_url: str,
@@ -297,27 +334,84 @@ def fetch_cs_cv_papers(
     max_retries: int = 5,
     backoff_start_seconds: float = 2.0,
     backoff_cap_seconds: float = 30.0,
+    skip_arxiv_id_with_version: set[str] | None = None,
+    max_scan_results: int | None = None,
+    stats: dict[str, int] | None = None,
 ) -> list[PaperMetadata]:
     if limit <= 0:
         return []
 
+    selected: list[PaperMetadata] = []
+    seen_versions: set[str] = set()
+    skip_versions = {item.strip() for item in (skip_arxiv_id_with_version or set()) if item.strip()}
+    scan_cap = max_scan_results if max_scan_results is not None else max(limit * 10, limit)
+    scan_cap = max(scan_cap, limit)
+    scanned_total = 0
+    skipped_total = 0
+    page_start = 0
+
     try:
-        api_feed = _fetch_arxiv_api_feed(
-            limit=limit,
-            arxiv_api_url=arxiv_api_url,
-            timeout_seconds=timeout_seconds,
-            user_agent=user_agent,
-            max_retries=max_retries,
-            backoff_start_seconds=backoff_start_seconds,
-            backoff_cap_seconds=backoff_cap_seconds,
-        )
-        return _parse_api_feed(api_feed)
+        while len(selected) < limit and scanned_total < scan_cap:
+            remaining_scan_budget = scan_cap - scanned_total
+            batch_size = min(limit, remaining_scan_budget)
+            if batch_size <= 0:
+                break
+
+            api_feed = _fetch_arxiv_api_feed(
+                start=page_start,
+                max_results=batch_size,
+                arxiv_api_url=arxiv_api_url,
+                timeout_seconds=timeout_seconds,
+                user_agent=user_agent,
+                max_retries=max_retries,
+                backoff_start_seconds=backoff_start_seconds,
+                backoff_cap_seconds=backoff_cap_seconds,
+            )
+            candidates = _parse_api_feed(api_feed)
+            if not candidates:
+                break
+
+            scanned_batch, skipped_batch = _append_filtered_papers(
+                candidates=candidates,
+                selected=selected,
+                selected_limit=limit,
+                skip_versions=skip_versions,
+                seen_versions=seen_versions,
+                scan_budget=remaining_scan_budget,
+            )
+            scanned_total += scanned_batch
+            skipped_total += skipped_batch
+            page_start += len(candidates)
+            if len(candidates) < batch_size:
+                break
     except httpx.HTTPStatusError as exc:
         if exc.response is None or exc.response.status_code != 429:
             raise
+        rss_feed = _fetch_arxiv_rss_feed(timeout_seconds=timeout_seconds, user_agent=user_agent)
+        rss_candidates = _parse_rss_feed(rss_feed, limit=scan_cap)
+        remaining_scan_budget = scan_cap - scanned_total
+        scanned_batch, skipped_batch = _append_filtered_papers(
+            candidates=rss_candidates,
+            selected=selected,
+            selected_limit=limit,
+            skip_versions=skip_versions,
+            seen_versions=seen_versions,
+            scan_budget=remaining_scan_budget,
+        )
+        scanned_total += scanned_batch
+        skipped_total += skipped_batch
 
-    rss_feed = _fetch_arxiv_rss_feed(timeout_seconds=timeout_seconds, user_agent=user_agent)
-    return _parse_rss_feed(rss_feed, limit=limit)
+    if stats is not None:
+        stats.clear()
+        stats.update(
+            {
+                "requested": limit,
+                "selected": len(selected),
+                "scanned": scanned_total,
+                "skipped": skipped_total,
+            }
+        )
+    return selected
 
 
 def _canonical_requested_id(raw_id: str) -> str:

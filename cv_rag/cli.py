@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 import re
 import subprocess
 import uuid
 
 import httpx
+from pydantic import BaseModel, Field, ValidationError
 from rich.console import Console
 from rich.table import Table
 import typer
+import yaml
 
 from cv_rag.arxiv_sync import (
     PaperMetadata,
@@ -25,8 +28,10 @@ from cv_rag.qdrant_store import QdrantStore, VectorPoint
 from cv_rag.retrieve import (
     HybridRetriever,
     RetrievedChunk,
-    build_answer_prompt,
+    build_query_prompt,
     build_strict_answer_prompt,
+    extract_entity_like_tokens,
+    filter_chunks_by_entity_tokens,
     format_citation,
 )
 from cv_rag.sqlite_store import SQLiteStore
@@ -39,11 +44,31 @@ COMPARISON_QUERY_RE = re.compile(
     r"\b(compare|comparison|versus|vs\.?|difference|different|better than|worse than)\b",
     re.IGNORECASE,
 )
-CITATION_REF_RE = re.compile(r"\[S\d+\]")
+CITATION_REF_RE = re.compile(r"\[S(\d+)\]")
+PARAGRAPH_SPLIT_RE = re.compile(r"\n\s*\n+")
 ANSWER_AUX_QUERIES = [
     "LoFTR supervision loss objective coarse fine",
     "SuperGlue loss negative log-likelihood dustbin Sinkhorn optimal transport",
 ]
+
+PREFACE_RE = re.compile(r"^(answer|citations?|sources?)\s*:\s*$", re.IGNORECASE)
+HEADING_RE = re.compile(r"^#{1,6}\s+\S")
+
+
+class EvalCase(BaseModel):
+    question: str
+    must_include_arxiv_ids: list[str] = Field(default_factory=list)
+    must_include_tokens: list[str] = Field(default_factory=list)
+    min_sources: int = 6
+
+
+@dataclass(slots=True)
+class EvalCaseResult:
+    index: int
+    question: str
+    status: bool
+    retrieved_sources: int
+    note: str
 
 
 def _load_tei_or_parse(pdf_path: Path, tei_path: Path, force: bool) -> str:
@@ -77,6 +102,95 @@ def _top_doc_source_counts(chunks: list[RetrievedChunk]) -> list[tuple[str, int]
         best_scores[chunk.arxiv_id] = max(best_scores.get(chunk.arxiv_id, float("-inf")), chunk.fused_score)
     top_docs = sorted(best_scores.keys(), key=lambda arxiv_id: best_scores[arxiv_id], reverse=True)[:2]
     return [(arxiv_id, counts[arxiv_id]) for arxiv_id in top_docs]
+
+
+def _split_paragraphs(text: str) -> list[str]:
+    stripped = text.strip()
+    if not stripped:
+        return []
+    return [part.strip() for part in PARAGRAPH_SPLIT_RE.split(stripped) if part.strip()]
+
+
+def _validate_answer_citations(answer_text: str, source_count: int) -> tuple[bool, str]:
+    paragraphs = _split_paragraphs(answer_text)
+
+    checked = 0
+    total_citations = 0
+
+    for paragraph_idx, paragraph in enumerate(paragraphs, start=1):
+        p = paragraph.strip()
+        if not p:
+            continue
+        if PREFACE_RE.match(p):
+            continue
+        if HEADING_RE.match(p):
+            continue
+
+        refs = [int(ref) for ref in CITATION_REF_RE.findall(p)]
+        if not refs:
+            return False, f"Paragraph {paragraph_idx} has no inline [S#] citation."
+        if any(ref < 1 or ref > source_count for ref in refs):
+            return False, f"Paragraph {paragraph_idx} cites a source outside S1..S{source_count}."
+        total_citations += len(refs)
+        checked += 1
+
+    if checked == 0:
+        return False, "Answer has no content paragraphs."
+
+    required_total = max(6, checked)
+    if total_citations < required_total:
+        return False, f"Found {total_citations} citations, need at least {required_total}."
+
+    return True, ""
+
+
+def _build_repair_prompt(question: str, chunks: list[RetrievedChunk], draft_text: str) -> str:
+    base_prompt = build_strict_answer_prompt(question, chunks)
+    return (
+        f"{base_prompt}\n\n"
+        "Draft to rewrite:\n"
+        f"{draft_text}\n\n"
+        "Rewrite the draft. Add inline [S#] citations to every paragraph and every non-trivial claim. "
+        "Remove any claim not supported by sources."
+    )
+
+
+def _load_eval_cases(suite_path: Path) -> list[EvalCase]:
+    try:
+        raw_data = yaml.safe_load(suite_path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        raise ValueError(f"Invalid YAML in {suite_path}: {exc}") from exc
+
+    if raw_data is None:
+        return []
+    if isinstance(raw_data, dict) and "cases" in raw_data:
+        raw_data = raw_data["cases"]
+    if not isinstance(raw_data, list):
+        raise ValueError("Eval suite root must be a list of cases.")
+
+    cases: list[EvalCase] = []
+    for idx, entry in enumerate(raw_data, start=1):
+        try:
+            cases.append(EvalCase.model_validate(entry))
+        except ValidationError as exc:
+            raise ValueError(f"Invalid eval case #{idx}: {exc}") from exc
+    return cases
+
+
+def _chunk_matches_eval_constraints(chunk: RetrievedChunk, case: EvalCase) -> bool:
+    if case.must_include_arxiv_ids and chunk.arxiv_id not in set(case.must_include_arxiv_ids):
+        return False
+    if case.must_include_tokens:
+        haystack = f"{chunk.title}\n{chunk.section_title}\n{chunk.text}".casefold()
+        if not all(token.casefold() in haystack for token in case.must_include_tokens):
+            return False
+    return True
+
+
+def _has_eval_constraint_match(chunks: list[RetrievedChunk], case: EvalCase) -> bool:
+    if not case.must_include_arxiv_ids and not case.must_include_tokens:
+        return True
+    return any(_chunk_matches_eval_constraints(chunk, case) for chunk in chunks)
 
 
 def _run_mlx_generate(
@@ -180,7 +294,8 @@ def _retrieve_for_answer(
     k: int,
     max_per_doc: int,
     section_boost: float,
-) -> list[RetrievedChunk]:
+    entity_tokens: list[str],
+) -> tuple[list[RetrievedChunk], list[RetrievedChunk]]:
     queries = [question, *ANSWER_AUX_QUERIES]
     per_query_top_k = max(k, 12)
     per_query_branch_k = max(per_query_top_k * 2, 24)
@@ -200,7 +315,10 @@ def _retrieve_for_answer(
         )
 
     merged = _merge_and_cap_chunks(merged_input, max_per_doc=max_per_doc)
-    return merged[:k]
+    maybe_relevant = merged[:3]
+    if entity_tokens:
+        merged = filter_chunks_by_entity_tokens(merged, entity_tokens)
+    return merged[:k], maybe_relevant
 
 
 def _ingest_papers(
@@ -321,6 +439,11 @@ def ingest(
         "-n",
         help="Number of newest cs.CV papers to ingest.",
     ),
+    skip_ingested: bool = typer.Option(
+        True,
+        "--skip-ingested/--no-skip-ingested",
+        help="Skip papers whose exact arXiv version is already in the local SQLite index.",
+    ),
     force_grobid: bool = typer.Option(
         False,
         help="Re-run GROBID parsing even when TEI already exists.",
@@ -334,10 +457,23 @@ def ingest(
     settings.ensure_directories()
 
     use_limit = limit or settings.default_arxiv_limit
+    ingested_versions: set[str] = set()
+    if skip_ingested:
+        sqlite_store = SQLiteStore(settings.sqlite_path)
+        try:
+            sqlite_store.create_schema()
+            ingested_versions = sqlite_store.get_ingested_versioned_ids()
+        finally:
+            sqlite_store.close()
 
     console.print(
-        f"[bold]Fetching newest cs.CV papers from arXiv (limit={use_limit})...[/bold]"
+        "[bold]Fetching newest cs.CV papers from arXiv "
+        f"(target_new={use_limit}, skip_ingested={'on' if skip_ingested else 'off'})...[/bold]"
     )
+    if skip_ingested:
+        console.print(f"Known ingested versions: {len(ingested_versions)}")
+
+    fetch_stats: dict[str, int] = {}
     papers = fetch_cs_cv_papers(
         limit=use_limit,
         arxiv_api_url=settings.arxiv_api_url,
@@ -346,8 +482,21 @@ def ingest(
         max_retries=settings.arxiv_max_retries,
         backoff_start_seconds=settings.arxiv_backoff_start_seconds,
         backoff_cap_seconds=settings.arxiv_backoff_cap_seconds,
+        skip_arxiv_id_with_version=ingested_versions if skip_ingested else None,
+        stats=fetch_stats,
+    )
+    console.print(
+        "Fetch summary: "
+        f"requested={fetch_stats.get('requested', use_limit)}, "
+        f"selected={fetch_stats.get('selected', len(papers))}, "
+        f"skipped={fetch_stats.get('skipped', 0)}"
     )
     if not papers:
+        if skip_ingested:
+            console.print(
+                "[yellow]No new cs.CV papers to ingest after skipping already ingested versions.[/yellow]"
+            )
+            return
         console.print("[yellow]No papers returned from arXiv.[/yellow]")
         raise typer.Exit(code=1)
 
@@ -464,7 +613,7 @@ def query(
         table.add_row(str(idx), citation, ", ".join(sorted(chunk.sources)), preview)
     console.print(table)
 
-    prompt = build_answer_prompt(question, chunks)
+    prompt = build_query_prompt(question, chunks)
     console.print("\n[bold]Answer prompt template:[/bold]")
     console.print(prompt)
 
@@ -493,6 +642,11 @@ def answer(
         "--show-sources",
         help="Print retrieved sources before generating the final answer.",
     ),
+    no_refuse: bool = typer.Option(
+        False,
+        "--no-refuse",
+        help="If citation validation still fails after repair, print the draft with a warning instead of exiting.",
+    ),
 ) -> None:
     settings = get_settings()
 
@@ -514,25 +668,30 @@ def answer(
         sqlite_store=sqlite_store,
     )
 
+    entity_tokens = extract_entity_like_tokens(question)
     try:
-        chunks = _retrieve_for_answer(
+        chunks, maybe_relevant = _retrieve_for_answer(
             retriever=retriever,
             question=question,
             k=k,
             max_per_doc=max_per_doc,
             section_boost=section_boost,
+            entity_tokens=entity_tokens,
         )
     finally:
         sqlite_store.close()
 
+    if entity_tokens and 0 < len(chunks) < k:
+        console.print(f"[yellow]Only {len(chunks)} relevant sources found.[/yellow]")
+
     if retriever._is_irrelevant_result(question, chunks[: max(3, len(chunks))], 0.45):
         console.print("Not found in indexed corpus. Try: cv-rag ingest-ids 2104.00680 1911.11763")
-        if chunks:
+        if maybe_relevant:
             table = Table(title="Maybe Relevant (Top 3)")
             table.add_column("Rank", justify="right")
             table.add_column("Citation")
             table.add_column("Preview")
-            for idx, chunk in enumerate(chunks[:3], start=1):
+            for idx, chunk in enumerate(maybe_relevant, start=1):
                 citation = format_citation(chunk.arxiv_id, chunk.section_title)
                 preview = chunk.text[:160].replace("\n", " ")
                 table.add_row(str(idx), citation, preview)
@@ -570,7 +729,7 @@ def answer(
         console.print(table)
 
     prompt = build_strict_answer_prompt(question, chunks)
-    answer_text = _run_mlx_generate(
+    draft_text = _run_mlx_generate(
         model=model,
         prompt=prompt,
         max_tokens=max_tokens,
@@ -579,22 +738,167 @@ def answer(
         seed=seed,
     )
 
-    required_citations = max(6, (k + 1) // 2)
-    if len(CITATION_REF_RE.findall(answer_text)) < required_citations:
-        revised_prompt = (
-            f"{prompt}\n\nYou forgot citations. Rewrite with citations on every claim."
-        )
+    valid, reason = _validate_answer_citations(draft_text, len(chunks))
+    answer_text = draft_text
+    if not valid:
+        console.print("[yellow]Draft failed citation check; attempting repair…[/yellow]")
+        repair_prompt = _build_repair_prompt(question, chunks, draft_text)
         answer_text = _run_mlx_generate(
             model=model,
-            prompt=revised_prompt,
+            prompt=repair_prompt,
             max_tokens=max_tokens,
             temperature=temperature,
             top_p=top_p,
             seed=seed,
         )
+        valid, reason = _validate_answer_citations(answer_text, len(chunks))
+        if not valid:
+            console.print(f"[red]Refusing answer: citation grounding check failed ({reason})[/red]")
+            console.print("\n[bold]Draft[/bold]")
+            console.print(draft_text)
+            if no_refuse:
+                console.print(
+                    "\n[bold red]WARNING: --no-refuse enabled. Returning draft despite failed citation validation.[/bold red]"
+                )
+                console.print("\n[bold]Answer (Unvalidated Draft)[/bold]")
+                console.print(draft_text)
+                return
+            raise typer.Exit(code=1)
 
     console.print("\n[bold]Answer[/bold]")
     console.print(answer_text)
+
+
+@app.command()
+def eval(
+    suite: Path = typer.Option(
+        Path("eval/questions.yaml"),
+        "--suite",
+        help="Path to YAML eval suite.",
+    ),
+    model: str = typer.Option(
+        "mlx-community/Qwen2.5-7B-Instruct-4bit",
+        "--model",
+        help="MLX model ID, local path, or HF repo.",
+    ),
+    k: int = typer.Option(12, "--k", help="Number of sources to include after retrieval merge."),
+    max_per_doc: int = typer.Option(
+        4,
+        "--max-per-doc",
+        help="Maximum number of chunks to keep per paper.",
+    ),
+    section_boost: float = typer.Option(
+        0.05,
+        "--section-boost",
+        help="Additive score boost for prioritized section/title matches; set 0 to disable.",
+    ),
+    max_tokens: int = typer.Option(600, "--max-tokens", help="Maximum tokens to generate per case."),
+) -> None:
+    if not suite.exists():
+        console.print(f"[red]Eval suite not found: {suite}[/red]")
+        raise typer.Exit(code=1)
+
+    try:
+        cases = _load_eval_cases(suite)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+
+    if not cases:
+        console.print(f"[yellow]Eval suite has no cases: {suite}[/yellow]")
+        raise typer.Exit(code=1)
+
+    settings = get_settings()
+    sqlite_store = SQLiteStore(settings.sqlite_path)
+    sqlite_store.create_schema()
+    qdrant_store = QdrantStore(
+        url=settings.qdrant_url,
+        collection_name=settings.qdrant_collection,
+    )
+    embed_client = OllamaEmbedClient(
+        base_url=settings.ollama_url,
+        model=settings.ollama_model,
+        timeout_seconds=settings.http_timeout_seconds,
+    )
+    retriever = HybridRetriever(
+        embedder=embed_client,
+        qdrant_store=qdrant_store,
+        sqlite_store=sqlite_store,
+    )
+
+    results: list[EvalCaseResult] = []
+    try:
+        for idx, case in enumerate(cases, start=1):
+            entity_tokens = extract_entity_like_tokens(case.question)
+            chunks, _ = _retrieve_for_answer(
+                retriever=retriever,
+                question=case.question,
+                k=k,
+                max_per_doc=max_per_doc,
+                section_boost=section_boost,
+                entity_tokens=entity_tokens,
+            )
+
+            reasons: list[str] = []
+            if len(chunks) < case.min_sources:
+                reasons.append(f"sources={len(chunks)} < min_sources={case.min_sources}")
+            if retriever._is_irrelevant_result(case.question, chunks[: max(3, len(chunks))], 0.45):
+                reasons.append("retrieval deemed irrelevant")
+            if not _has_eval_constraint_match(chunks, case):
+                reasons.append("no chunk matched must_include constraints")
+
+            if reasons:
+                results.append(
+                    EvalCaseResult(
+                        index=idx,
+                        question=case.question,
+                        status=False,
+                        retrieved_sources=len(chunks),
+                        note="; ".join(reasons),
+                    )
+                )
+                continue
+
+            prompt = build_strict_answer_prompt(case.question, chunks)
+            answer_text = _run_mlx_generate(
+                model=model,
+                prompt=prompt,
+                max_tokens=max_tokens,
+                temperature=0.0,
+                top_p=1.0,
+                seed=0,
+            )
+            citations_ok, citation_reason = _validate_answer_citations(answer_text, len(chunks))
+            results.append(
+                EvalCaseResult(
+                    index=idx,
+                    question=case.question,
+                    status=citations_ok,
+                    retrieved_sources=len(chunks),
+                    note="" if citations_ok else citation_reason,
+                )
+            )
+    finally:
+        sqlite_store.close()
+
+    table = Table(title=f"Eval Results ({sum(1 for r in results if r.status)}/{len(results)} passed)")
+    table.add_column("#", justify="right")
+    table.add_column("Status")
+    table.add_column("Sources", justify="right")
+    table.add_column("Question")
+    table.add_column("Note")
+    for result in results:
+        table.add_row(
+            str(result.index),
+            "PASS" if result.status else "FAIL",
+            str(result.retrieved_sources),
+            result.question,
+            result.note,
+        )
+    console.print(table)
+
+    if any(not result.status for result in results):
+        raise typer.Exit(code=1)
 
 
 @app.command()

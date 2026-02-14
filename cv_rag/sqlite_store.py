@@ -147,6 +147,21 @@ class SQLiteStore:
         )
         self.conn.commit()
 
+    def get_ingested_versioned_ids(self) -> set[str]:
+        rows = self.conn.execute(
+            """
+            SELECT arxiv_id_with_version
+            FROM papers
+            WHERE arxiv_id_with_version IS NOT NULL
+              AND TRIM(arxiv_id_with_version) != ''
+            """
+        ).fetchall()
+        return {
+            str(row["arxiv_id_with_version"]).strip()
+            for row in rows
+            if str(row["arxiv_id_with_version"]).strip()
+        }
+
     def keyword_search(self, query: str, limit: int) -> list[dict[str, Any]]:
         terms = TOKEN_RE.findall(query)
         if not terms:
