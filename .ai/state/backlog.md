@@ -4,13 +4,7 @@ Last updated: 2026-02-15
 
 ## In Progress
 
-### [TASK-012] Add IngestService integration tests
-- **Status**: implementing
-- **Priority**: low
-- **Packages**: `ingest/service.py`
-- **Spec**: `.ai/state/sessions/2026-02-15-TASK-012-spec.md`
-- **Handoff**: `.ai/state/sessions/2026-02-15-TASK-012-architect-implementer.md`
-- **Description**: No dedicated tests for `IngestService`. Test `ingest_latest`, `ingest_ids`, `ingest_jsonl` with injected fakes for arXiv fetchers and dedupe/migration hooks.
+(none)
 
 ## Backlog
 
@@ -91,3 +85,8 @@ Last updated: 2026-02-15
 - **Completed**: 2026-02-15
 - **Test file**: `tests/test_answer_service.py` (6 tests)
 - **Description**: Offline integration-style tests for `AnswerService.run()`/`.stream()` covering routing, retrieval, citation repair/refusal, and streaming event flow.
+
+### [TASK-012] Add IngestService integration tests
+- **Completed**: 2026-02-15
+- **Test file**: `tests/test_ingest_service.py` (9 tests)
+- **Description**: Offline service-level tests for `IngestService` selection logic (latest/ids/jsonl), exact-version skip hooks, and stats/error propagation.
