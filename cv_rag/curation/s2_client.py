@@ -23,12 +23,26 @@ def _dedupe_preserve(values: list[str]) -> list[str]:
     return out
 
 
+def _doi_value(value: str) -> str | None:
+    candidate = value.strip()
+    lowered = candidate.casefold()
+    if lowered.startswith("doi:"):
+        candidate = candidate.split(":", 1)[1].strip()
+        lowered = candidate.casefold()
+    if lowered.startswith("10."):
+        return candidate
+    return None
+
+
 def _paper_id_candidates(arxiv_id: str) -> list[str]:
     value = arxiv_id.strip()
     if not value:
         return []
     if value.startswith("http://") or value.startswith("https://"):
         return [value]
+    doi = _doi_value(value)
+    if doi is not None:
+        return _dedupe_preserve([f"DOI:{doi}", value, f"https://doi.org/{doi}"])
     candidates = [value]
     if not value.upper().startswith("ARXIV:"):
         candidates.append(f"ARXIV:{value}")
@@ -42,6 +56,9 @@ def _batch_paper_id(arxiv_id: str) -> str:
         return value
     if value.startswith("http://") or value.startswith("https://"):
         return value
+    doi = _doi_value(value)
+    if doi is not None:
+        return f"DOI:{doi}"
     if value.upper().startswith("ARXIV:"):
         return value
     return f"ARXIV:{value}"

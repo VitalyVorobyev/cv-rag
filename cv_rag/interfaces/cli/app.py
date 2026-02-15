@@ -291,6 +291,11 @@ def curate(
         "--refresh-days",
         help="Refresh metrics older than this many days.",
     ),
+    skip_non_arxiv: bool = typer.Option(
+        True,
+        "--skip-non-arxiv/--no-skip-non-arxiv",
+        help="Skip IDs that are neither arXiv nor DOI (e.g. raw url:* docs) during Semantic Scholar curation.",
+    ),
     tier0_venues: Path = typer.Option(
         Path("data/venues_tier0.txt"),
         "--tier0-venues",
@@ -327,6 +332,7 @@ def curate(
         settings=settings,
         console=console,
         refresh_days=refresh_days,
+        skip_non_arxiv=skip_non_arxiv,
         tier0_venues=tier0_venues,
         tier0_min_citations=tier0_min_citations,
         tier0_min_cpy=tier0_min_cpy,

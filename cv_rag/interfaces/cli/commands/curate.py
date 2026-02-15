@@ -21,6 +21,7 @@ def run_curate_command(
     settings: Settings,
     console: Console,
     refresh_days: int,
+    skip_non_arxiv: bool = True,
     tier0_venues: Path,
     tier0_min_citations: int,
     tier0_min_cpy: float,
@@ -49,6 +50,7 @@ def run_curate_command(
         options = CurateOptions(
             refresh_days=refresh_days,
             limit=limit,
+            skip_non_arxiv=skip_non_arxiv,
             thresholds=thresholds,
         )
         s2_client = s2_client_cls(
@@ -82,4 +84,5 @@ def run_curate_command(
     console.print(f"Refreshed candidates: {result.to_refresh}")
     console.print(f"Updated: {result.updated}")
     console.print(f"Skipped: {result.skipped}")
+    console.print(f"Skipped non-curatable IDs: {result.skipped_non_curatable}")
     console.print(f"Tier distribution: {tier_counts}")
