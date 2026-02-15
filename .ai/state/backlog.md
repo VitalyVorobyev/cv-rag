@@ -5,12 +5,7 @@ Last updated: 2026-02-15
 ## In Progress
 
 ### [TASK-011] Add AnswerService integration tests
-- **Status**: implementing
-- **Priority**: medium
-- **Packages**: `answer/service.py`
-- **Spec**: `.ai/state/sessions/2026-02-15-TASK-011-spec.md`
-- **Handoff**: `.ai/state/sessions/2026-02-15-TASK-011-architect-implementer.md`
-- **Description**: No dedicated tests for `AnswerService.run()` or `.stream()`. Test the full flow: prepare → route → retrieve → generate → validate. Monkeypatch retriever and MLX runner.
+(none)
 
 ## Backlog
 
@@ -89,3 +84,8 @@ Last updated: 2026-02-15
 - **Completed**: 2026-02-15
 - **Test file**: `tests/test_mlx_runner.py` (11 tests)
 - **Description**: Subprocess wrapper tests for `mlx_generate`, `mlx_generate_stream`, and `sse_event` (success + error paths).
+
+### [TASK-011] Add AnswerService integration tests
+- **Completed**: 2026-02-15
+- **Test file**: `tests/test_answer_service.py` (6 tests)
+- **Description**: Offline integration-style tests for `AnswerService.run()`/`.stream()` covering routing, retrieval, citation repair/refusal, and streaming event flow.
