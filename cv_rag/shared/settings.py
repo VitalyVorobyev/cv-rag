@@ -16,6 +16,7 @@ class Settings(BaseModel):
     pdf_dir: Path = Path("data/pdfs")
     tei_dir: Path = Path("data/tei")
     metadata_dir: Path = Path("data/metadata")
+    discovery_runs_dir: Path = Path("data/curation/runs")
     metadata_json_path: Path = Path("data/metadata/arxiv_cs_cv.json")
     sqlite_path: Path = Path("data/cv_rag.sqlite3")
     qdrant_collection: str = "cv_papers"
@@ -32,6 +33,14 @@ class Settings(BaseModel):
     grobid_backoff_cap_seconds: float = 20.0
     embed_batch_size: int = 16
     relevance_vector_threshold: float = 0.45
+    candidate_max_retries: int = 5
+    candidate_retry_days: int = 14
+    provenance_boost_curated: float = 0.08
+    provenance_boost_canonical_api: float = 0.05
+    provenance_boost_scraped: float = 0.02
+    answer_prompt_version: str = "v2"
+    router_min_confidence: float = 0.55
+    router_enable_decision_mode: bool = True
     user_agent: str = Field(default="cv-rag/0.1 (+local)")
 
     def ensure_directories(self) -> None:
@@ -39,6 +48,7 @@ class Settings(BaseModel):
         self.pdf_dir.mkdir(parents=True, exist_ok=True)
         self.tei_dir.mkdir(parents=True, exist_ok=True)
         self.metadata_dir.mkdir(parents=True, exist_ok=True)
+        self.discovery_runs_dir.mkdir(parents=True, exist_ok=True)
 
 
 @lru_cache(maxsize=1)
@@ -47,6 +57,17 @@ def get_settings() -> Settings:
     pdf_dir = Path(os.getenv("CV_RAG_PDF_DIR", str(data_dir / "pdfs")))
     tei_dir = Path(os.getenv("CV_RAG_TEI_DIR", str(data_dir / "tei")))
     metadata_dir = Path(os.getenv("CV_RAG_METADATA_DIR", str(data_dir / "metadata")))
+    discovery_runs_dir = Path(
+        os.getenv("CV_RAG_DISCOVERY_RUNS_DIR", str(data_dir / "curation" / "runs"))
+    )
+
+    router_enable_decision_mode = os.getenv("CV_RAG_ROUTER_ENABLE_DECISION_MODE", "true").strip()
+    router_enable_decision_mode_bool = router_enable_decision_mode.casefold() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
     settings = Settings(
         qdrant_url=os.getenv("CV_RAG_QDRANT_URL", "http://localhost:6333"),
@@ -57,6 +78,7 @@ def get_settings() -> Settings:
         pdf_dir=pdf_dir,
         tei_dir=tei_dir,
         metadata_dir=metadata_dir,
+        discovery_runs_dir=discovery_runs_dir,
         metadata_json_path=Path(
             os.getenv("CV_RAG_METADATA_JSON", str(metadata_dir / "arxiv_cs_cv.json"))
         ),
@@ -74,6 +96,16 @@ def get_settings() -> Settings:
         grobid_backoff_start_seconds=float(os.getenv("CV_RAG_GROBID_BACKOFF_START", "2")),
         grobid_backoff_cap_seconds=float(os.getenv("CV_RAG_GROBID_BACKOFF_CAP", "20")),
         embed_batch_size=int(os.getenv("CV_RAG_EMBED_BATCH_SIZE", "16")),
+        candidate_max_retries=int(os.getenv("CV_RAG_CANDIDATE_MAX_RETRIES", "5")),
+        candidate_retry_days=int(os.getenv("CV_RAG_CANDIDATE_RETRY_DAYS", "14")),
+        provenance_boost_curated=float(os.getenv("CV_RAG_PROVENANCE_BOOST_CURATED", "0.08")),
+        provenance_boost_canonical_api=float(
+            os.getenv("CV_RAG_PROVENANCE_BOOST_CANONICAL_API", "0.05")
+        ),
+        provenance_boost_scraped=float(os.getenv("CV_RAG_PROVENANCE_BOOST_SCRAPED", "0.02")),
+        answer_prompt_version=os.getenv("CV_RAG_ANSWER_PROMPT_VERSION", "v2"),
+        router_min_confidence=float(os.getenv("CV_RAG_ROUTER_MIN_CONFIDENCE", "0.55")),
+        router_enable_decision_mode=router_enable_decision_mode_bool,
         user_agent=os.getenv("CV_RAG_USER_AGENT", "cv-rag/0.1 (+local)"),
     )
     return settings

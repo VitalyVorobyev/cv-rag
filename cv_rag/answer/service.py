@@ -41,9 +41,27 @@ class AnswerService:
         self._stream_generate = stream_generate_fn
 
     def _prepare(self, request: AnswerRunRequest) -> _PreparedAnswerContext:
+        if self.settings.answer_prompt_version.strip().casefold() != "v2":
+            raise ValueError(
+                f"Unsupported answer prompt version: {self.settings.answer_prompt_version}. "
+                "Only 'v2' is supported."
+            )
+
         mode_value = request.mode.strip().casefold()
-        if mode_value not in {"auto", "single", "compare", "survey", "implement", "evidence"}:
-            raise ValueError("Invalid mode. Use: auto|single|compare|survey|implement|evidence")
+        if mode_value not in {
+            "auto",
+            "single",
+            "explain",
+            "compare",
+            "survey",
+            "implement",
+            "evidence",
+            "decision",
+        }:
+            raise ValueError(
+                "Invalid mode. Use: auto|explain|compare|survey|implement|evidence|decision "
+                "(single alias supported)"
+            )
 
         router_strategy = request.router_strategy.strip().casefold()
         if router_strategy not in {"rules", "llm", "hybrid"}:
@@ -79,6 +97,8 @@ class AnswerService:
                 prelim_chunks=prelim_chunks,
                 model_id=router_model_id,
                 strategy=router_strategy,
+                router_min_confidence=self.settings.router_min_confidence,
+                enable_decision_mode=self.settings.router_enable_decision_mode,
             )
         else:
             forced_mode = mode_from_value(mode_value)
@@ -86,6 +106,7 @@ class AnswerService:
                 forced_mode,
                 notes=f"Manual mode override: {forced_mode.value}.",
                 confidence=1.0,
+                reason_codes=["manual_override"],
             )
 
         final_k = request.k if request.k is not None else decision.k
@@ -197,6 +218,8 @@ class AnswerService:
                 "confidence": context.decision.confidence,
                 "notes": context.decision.notes,
                 "preface": context.decision.preface,
+                "reason_codes": context.decision.reason_codes,
+                "policy_version": context.decision.policy_version,
             },
         )
 

@@ -14,7 +14,8 @@ class SearchRequest(BaseModel):
 
 class ChunkResponse(BaseModel):
     chunk_id: str
-    arxiv_id: str
+    doc_id: str | None = None
+    arxiv_id: str | None = None
     title: str
     section_title: str
     text: str
@@ -53,6 +54,8 @@ class RouteInfo(BaseModel):
     confidence: float
     notes: str
     preface: str | None = None
+    reason_codes: list[str] = Field(default_factory=list)
+    policy_version: str = "v2"
 
 
 class AnswerResponse(BaseModel):
@@ -65,7 +68,8 @@ class AnswerResponse(BaseModel):
 
 
 class PaperSummary(BaseModel):
-    arxiv_id: str
+    doc_id: str | None = None
+    arxiv_id: str | None = None
     title: str
     summary: str | None = None
     published: str | None = None

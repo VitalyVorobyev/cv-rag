@@ -18,6 +18,17 @@ Structured workflow for AI-assisted development of cv-rag.
 3. **Reviewer** checks the code, writes tests, approves or sends back
 4. **Human** merges to main
 
+Workflow is enforced by CI:
+
+```bash
+uv run python .ai/scripts/validate_workflow.py
+```
+
+The validator checks backlog/spec/handoff consistency and will fail CI when artifacts drift.
+
+Repository policy: legacy CLI commands `seed-awesome`, `resolve-dois`, `seed awesome`, and
+`seed visionbib` are removed. Use `cv-rag corpus ...` commands and `cv-rag migrate reset-reindex`.
+
 ## Directory Layout
 
 ```

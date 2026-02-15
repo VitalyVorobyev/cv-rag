@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from cv_rag.answer.prompt_templates_v2 import render_mode_instructions
 from cv_rag.answer.routing import PROMPT_SPECS, AnswerMode
 from cv_rag.retrieval.models import RetrievedChunk
 
@@ -19,42 +20,6 @@ def _render_sources(chunks: list[RetrievedChunk]) -> list[str]:
     return lines
 
 
-def _mode_instructions(mode: AnswerMode) -> list[str]:
-    if mode is AnswerMode.COMPARE:
-        return [
-            "Mode: COMPARE",
-            "Contrast at least two papers explicitly and attribute each claim to relevant sources.",
-            "Prioritize differences in objective, architecture, supervision, data regime, and failure modes.",
-            "Use grouped points where useful, but keep concise.",
-        ]
-    if mode is AnswerMode.SURVEY:
-        return [
-            "Mode: SURVEY",
-            "Map the landscape of options from the sources; group approaches by idea family.",
-            "Cover tradeoffs and when to choose each option.",
-            "Use grouped points where useful, but keep concise.",
-        ]
-    if mode is AnswerMode.IMPLEMENTATION:
-        return [
-            "Mode: IMPLEMENTATION",
-            "Provide practical implementation steps grounded in sources only.",
-            "Include assumptions, pipeline order, and common pitfalls mentioned by papers.",
-            "Do not invent code details absent from sources.",
-        ]
-    if mode is AnswerMode.EVIDENCE:
-        return [
-            "Mode: EVIDENCE",
-            "Focus on what papers claim and what evidence supports each claim.",
-            "Prioritize results, ablations, metrics, and limitations in the provided excerpts.",
-            "Call out missing evidence explicitly when needed.",
-        ]
-    return [
-        "Mode: SINGLE_PAPER",
-        "Explain the core method or paper clearly and compactly.",
-        "Prioritize mechanism, assumptions, and concrete takeaways grounded in sources.",
-    ]
-
-
 def build_prompt(
     mode: AnswerMode,
     question: str,
@@ -66,13 +31,13 @@ def build_prompt(
 
     lines: list[str] = []
     lines.append("You are a careful computer vision research assistant.")
-    lines.append(spec.instruction_focus)
+    lines.append(f"Prompt policy: v2. {spec.instruction_focus}")
     lines.append("")
     lines.append("Question:")
     lines.append(question)
     lines.append("")
     lines.extend(_render_sources(chunks))
-    lines.extend(_mode_instructions(mode))
+    lines.extend(render_mode_instructions(mode))
     lines.append("")
     lines.append("Rules:")
     lines.append("1. Only use information supported by the sources.")
@@ -88,15 +53,15 @@ def build_prompt(
     if route_preface:
         lines.append(
             "11. Start P1 with a short routing note consistent with this sentence, then continue with content: "
-            f"\"{route_preface}\""
+            f'"{route_preface}"'
         )
     lines.append("")
     lines.append("Output format (MANDATORY):")
     lines.append("Write EXACTLY 4 paragraphs labeled P1..P4, no headings.")
     lines.append("Each paragraph must have 2 sentences.")
     lines.append("EVERY sentence must end with one or more citations like [S1] or [S1][S2].")
-    if mode in {AnswerMode.COMPARE, AnswerMode.SURVEY}:
-        lines.append("For P2 or P3, include grouped comparisons/options in concise semicolon-separated clauses.")
+    if mode in {AnswerMode.COMPARE, AnswerMode.SURVEY, AnswerMode.DECISION}:
+        lines.append("For P2 or P3, include concise semicolon-separated grouped tradeoffs/comparisons.")
     lines.append("Do not output any text before P1.")
     lines.append("")
     lines.append("Template (follow exactly):")

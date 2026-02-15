@@ -48,6 +48,13 @@ class QdrantStore:
             ),
         )
 
+    def delete_collection_if_exists(self) -> bool:
+        collection_names = {c.name for c in self.client.get_collections().collections}
+        if self.collection_name not in collection_names:
+            return False
+        self.client.delete_collection(collection_name=self.collection_name)
+        return True
+
     def upsert(self, points: list[VectorPoint], batch_size: int = 64) -> None:
         if not points:
             return
@@ -101,9 +108,11 @@ class QdrantStore:
         for item in results:
             payload = dict(getattr(item, "payload", {}) or {})
             point_id = payload.get("chunk_id") or str(getattr(item, "id", ""))
+            doc_id = payload.get("doc_id")
             out.append(
                 {
                     "chunk_id": point_id,
+                    "doc_id": str(doc_id) if doc_id else None,
                     "arxiv_id": payload.get("arxiv_id", ""),
                     "title": payload.get("title", ""),
                     "section_title": payload.get("section_title", ""),

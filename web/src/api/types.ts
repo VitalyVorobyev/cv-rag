@@ -24,6 +24,8 @@ export interface RouteInfo {
   confidence: number;
   notes: string;
   preface: string | null;
+  reason_codes?: string[];
+  policy_version?: string;
 }
 
 export interface AnswerResponse {
@@ -84,7 +86,15 @@ export interface HealthResponse {
   services: ServiceHealth[];
 }
 
-export type AnswerMode = 'auto' | 'single' | 'compare' | 'survey' | 'implement' | 'evidence';
+export type AnswerMode =
+  | 'auto'
+  | 'single'
+  | 'explain'
+  | 'compare'
+  | 'survey'
+  | 'implement'
+  | 'evidence'
+  | 'decision';
 
 export interface AnswerRequest {
   question: string;

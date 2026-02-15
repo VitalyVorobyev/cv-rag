@@ -24,3 +24,15 @@ class CitationValidationError(CvRagError):
         super().__init__(reason)
         self.reason = reason
         self.draft = draft
+
+
+class ReferenceResolutionError(CvRagError):
+    """Raised when reference resolution fails in a non-recoverable way."""
+
+
+class CandidateStateError(CvRagError):
+    """Raised when candidate lifecycle transitions are invalid."""
+
+
+class FulltextAcquisitionError(CvRagError):
+    """Raised when fetching or loading fulltext content fails."""

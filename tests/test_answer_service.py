@@ -147,7 +147,7 @@ def test_answer_service_run_happy_path_auto_rules(tmp_path: Path) -> None:
     assert result.answer == _valid_answer()
     assert result.citation_valid is True
     assert result.citation_reason == ""
-    assert result.route.mode is AnswerMode.SINGLE_PAPER
+    assert result.route.mode is AnswerMode.EXPLAIN
     assert len(result.sources) == 2
     assert result.warnings == []
     assert len(retriever.retrieve_calls) == 2

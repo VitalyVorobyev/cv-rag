@@ -7,8 +7,9 @@ from unittest.mock import MagicMock, patch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from cv_rag.answer.models import AnswerEvent
 from cv_rag.interfaces.api.deps import get_app_settings, get_retriever, get_sqlite_store
-from cv_rag.interfaces.api.routers import health, papers, search, stats
+from cv_rag.interfaces.api.routers import answer, health, papers, search, stats
 from cv_rag.retrieval.models import RetrievedChunk
 
 # ===========================================================================
@@ -334,3 +335,58 @@ def test_parse_authors_empty_string() -> None:
     from cv_rag.interfaces.api.routers.papers import _parse_authors
 
     assert _parse_authors("") == []
+
+
+# ===========================================================================
+# Answer router
+# ===========================================================================
+
+
+def test_answer_router_done_payload_includes_v2_route_fields(tmp_path: Path) -> None:
+    retriever = MagicMock()
+    settings = _make_settings(tmp_path)
+    app = _make_app([answer.router], mock_retriever=retriever, mock_settings=settings)
+
+    class FakeAnswerService:
+        def __init__(self, retriever: object, settings: object) -> None:
+            _ = (retriever, settings)
+
+        def stream(self, request: object):  # type: ignore[no-untyped-def]
+            _ = request
+            yield AnswerEvent(
+                event="done",
+                data={
+                    "answer": "P1: Test [S1]\\n\\nP2: Test [S1]\\n\\nP3: Test [S1]\\n\\nP4: Test [S1]",
+                    "sources": [],
+                    "route": {
+                        "mode": "explain",
+                        "targets": [],
+                        "k": 8,
+                        "max_per_doc": 4,
+                        "confidence": 0.9,
+                        "notes": "test route",
+                        "preface": None,
+                        "reason_codes": ["default_explain"],
+                        "policy_version": "v2",
+                    },
+                    "citation_valid": True,
+                    "citation_reason": "",
+                    "elapsed_ms": 2.3,
+                },
+            )
+
+    with patch("cv_rag.interfaces.api.routers.answer.AnswerService", FakeAnswerService):
+        client = TestClient(app)
+        resp = client.post(
+            "/api/answer",
+            json={
+                "question": "Explain LoFTR",
+                "model": "mlx-community/Qwen2.5-7B-Instruct-4bit",
+                "mode": "auto",
+            },
+        )
+
+    assert resp.status_code == 200
+    body = resp.text
+    assert '\"policy_version\": \"v2\"' in body
+    assert '\"reason_codes\": [\"default_explain\"]' in body

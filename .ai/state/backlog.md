@@ -4,11 +4,29 @@ Last updated: 2026-02-15
 
 ## In Progress
 
-(none)
+### [TASK-013] Multi-Source Corpus Growth Architecture
+- **Status**: reviewing
+- **Note**: implemented, pending independent reviewer handoff + final reviewer artifact per workflow
 
 ## Backlog
 
-(none)
+### [TASK-014] Pre-deployment store migration: reset + reindex
+- **Description**: destructive local reset workflow with backup + deterministic rebuild report
+- **Status**: backlog
+- **Depends on**: TASK-013
+
+### [TASK-015] Breaking removal of legacy seeding/resolve CLI commands
+- **Description**: remove/fail legacy command paths, keep only corpus workflow commands
+- **Status**: backlog
+- **Depends on**: TASK-014
+
+### [TASK-016] Answer generation v2: prompt and router redesign
+- **Description**: new mode taxonomy, router policy v2, prompt templates v2, eval-gated rollout
+- **Status**: backlog
+
+### [TASK-017] Workflow compliance hard CI gate + TASK-012 postmortem
+- **Description**: enforce backlog/handoff chain in CI, add retro note for TASK-012 process miss
+- **Status**: backlog
 
 ## Done
 
@@ -90,3 +108,4 @@ Last updated: 2026-02-15
 - **Completed**: 2026-02-15
 - **Test file**: `tests/test_ingest_service.py` (9 tests)
 - **Description**: Offline service-level tests for `IngestService` selection logic (latest/ids/jsonl), exact-version skip hooks, and stats/error propagation.
+- **Process disposition**: kept done; retroactive postmortem required by TASK-017

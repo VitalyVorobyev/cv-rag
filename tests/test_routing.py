@@ -23,7 +23,7 @@ def test_rule_router_compare_question_maps_to_compare() -> None:
 
 def test_rule_router_explain_question_maps_to_single() -> None:
     decision, confidence = rule_router("Explain SuperGlue dustbins", [])
-    assert decision.mode is AnswerMode.SINGLE_PAPER
+    assert decision.mode is AnswerMode.EXPLAIN
     assert confidence >= 0.7
 
 
@@ -35,7 +35,7 @@ def test_rule_router_options_question_maps_to_survey() -> None:
 
 def test_rule_router_implement_question_maps_to_implementation() -> None:
     decision, confidence = rule_router("How to implement SuperGlue matching layer?", [])
-    assert decision.mode is AnswerMode.IMPLEMENTATION
+    assert decision.mode is AnswerMode.IMPLEMENT
     assert confidence >= 0.9
 
 
@@ -65,7 +65,7 @@ def test_route_post_check_prefers_single_for_dominant_one_doc_unless_explicit_co
         model_id="unused",
         strategy="rules",
     )
-    assert single_decision.mode is AnswerMode.SINGLE_PAPER
+    assert single_decision.mode is AnswerMode.EXPLAIN
 
     compare_prelim = [*dominant_prelim, _chunk("1911.11763", 1, 0.69)]
     compare_decision = route(
@@ -75,3 +75,15 @@ def test_route_post_check_prefers_single_for_dominant_one_doc_unless_explicit_co
         strategy="rules",
     )
     assert compare_decision.mode is AnswerMode.COMPARE
+
+
+def test_rule_router_decision_question_maps_to_decision() -> None:
+    decision, confidence = rule_router("Which method should I use for low-texture matching?", [])
+    assert decision.mode is AnswerMode.DECISION
+    assert confidence >= 0.85
+
+
+def test_mode_alias_single_maps_to_explain() -> None:
+    from cv_rag.answer.routing import mode_from_value
+
+    assert mode_from_value("single") is AnswerMode.EXPLAIN

@@ -15,6 +15,8 @@ import httpx
 from cv_rag.ingest.arxiv_client import normalize_arxiv_id
 from cv_rag.seeding.doi import normalize_doi
 from cv_rag.shared.http import http_request_with_retry
+from cv_rag.storage.repositories import ReferenceRecord, ResolvedReference, build_axv_doc_id
+from cv_rag.storage.sqlite import SQLiteStore
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +71,8 @@ class ResolveStats:
     tier_a_urls_path: Path
     tier_a_arxiv_path: Path | None
     cache_dir: Path
+    run_id: str | None = None
+    run_artifact_path: Path | None = None
 
 
 def _normalize_optional_text(value: object) -> str | None:
@@ -283,6 +287,36 @@ def _write_lines(path: Path, lines: list[str]) -> None:
             file_handle.write("\n")
 
 
+def _write_run_resolution_artifact(
+    *,
+    runs_dir: Path,
+    run_id: str,
+    resolved: list[ResolvedReference],
+) -> Path:
+    run_dir = runs_dir / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    path = run_dir / "openalex_resolution.jsonl"
+    with path.open("w", encoding="utf-8") as file_handle:
+        for item in resolved:
+            file_handle.write(
+                json.dumps(
+                    {
+                        "doc_id": item.doc_id,
+                        "arxiv_id": item.arxiv_id,
+                        "arxiv_id_with_version": item.arxiv_id_with_version,
+                        "doi": item.doi,
+                        "pdf_url": item.pdf_url,
+                        "resolution_confidence": item.resolution_confidence,
+                        "source_kind": item.source_kind,
+                        "resolved_at_unix": item.resolved_at_unix,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            file_handle.write("\n")
+    return path
+
+
 def resolve_dois_openalex(
     *,
     dois_path: Path,
@@ -298,7 +332,16 @@ def resolve_dois_openalex(
     cache_path: Path | None = None,
     tier_a_urls_path: Path = DEFAULT_TIER_A_OPENALEX_URLS_PATH,
     tier_a_arxiv_path: Path | None = None,
+    run_id: str | None = None,
+    runs_dir: Path | None = None,
+    sqlite_path: Path | None = None,
+    source_kind: str = "curated_repo",
+    candidate_retry_days: int = 14,
+    candidate_max_retries: int = 5,
 ) -> ResolveStats:
+    discovered_at_unix = int(time.time())
+    effective_run_id = run_id or datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    run_artifact_path: Path | None = None
     dois = load_dois(dois_path)
     out_dir.mkdir(parents=True, exist_ok=True)
     jsonl_path = out_dir / "openalex_resolved.jsonl"
@@ -315,6 +358,17 @@ def resolve_dois_openalex(
     unresolved = 0
     resolved_pdf_by_doi: dict[str, str] = {}
     resolved_arxiv_by_doi: dict[str, str] = {}
+    reference_records: list[ReferenceRecord] = [
+        ReferenceRecord(
+            ref_type="doi",
+            normalized_value=doi,
+            source_kind=source_kind,
+            source_ref=str(dois_path),
+            discovered_at_unix=discovered_at_unix,
+        )
+        for doi in dois
+    ]
+    resolved_refs: list[ResolvedReference] = []
 
     with (
         httpx.Client(timeout=timeout_seconds, headers=headers, follow_redirects=True) as client,
@@ -364,6 +418,19 @@ def resolve_dois_openalex(
                 resolved_pdf_by_doi[doi] = record.pdf_url
             if record.arxiv_id:
                 resolved_arxiv_by_doi[doi] = record.arxiv_id
+            resolved_doc_id = build_axv_doc_id(record.arxiv_id) if record.arxiv_id else f"doi:{doi}"
+            resolved_refs.append(
+                ResolvedReference(
+                    doc_id=resolved_doc_id,
+                    arxiv_id=record.arxiv_id,
+                    arxiv_id_with_version=record.arxiv_id,
+                    doi=doi,
+                    pdf_url=record.pdf_url,
+                    resolution_confidence=0.95 if record.arxiv_id else (0.75 if record.pdf_url else 0.30),
+                    source_kind="openalex_resolved",
+                    resolved_at_unix=discovered_at_unix,
+                )
+            )
 
     sorted_pdf_urls_by_doi = sorted(resolved_pdf_by_doi.items(), key=lambda item: item[0])
     unique_urls: list[str] = []
@@ -382,6 +449,26 @@ def resolve_dois_openalex(
     if tier_a_arxiv_path is not None:
         _write_lines(tier_a_arxiv_path, unique_arxiv)
 
+    if runs_dir is not None:
+        run_artifact_path = _write_run_resolution_artifact(
+            runs_dir=runs_dir,
+            run_id=effective_run_id,
+            resolved=resolved_refs,
+        )
+    if sqlite_path is not None:
+        sqlite_store = SQLiteStore(sqlite_path)
+        try:
+            sqlite_store.create_schema()
+            sqlite_store.upsert_reference_graph(
+                refs=reference_records,
+                resolved=resolved_refs,
+                run_id=effective_run_id,
+                candidate_retry_days=candidate_retry_days,
+                candidate_max_retries=candidate_max_retries,
+            )
+        finally:
+            sqlite_store.close()
+
     return ResolveStats(
         dois_processed=len(dois),
         resolved_records=resolved_records,
@@ -393,7 +480,84 @@ def resolve_dois_openalex(
         tier_a_urls_path=tier_a_urls_path,
         tier_a_arxiv_path=tier_a_arxiv_path,
         cache_dir=cache_dir,
+        run_id=effective_run_id,
+        run_artifact_path=run_artifact_path,
     )
+
+
+def resolve_references_openalex(
+    *,
+    doi_refs: list[ReferenceRecord],
+    run_id: str,
+    out_dir: Path,
+    user_agent: str,
+    email: str | None = None,
+    api_key: str | None = None,
+    timeout_seconds: float = 20.0,
+    max_retries: int = 5,
+    backoff_start_seconds: float = 1.0,
+    backoff_cap_seconds: float = 30.0,
+    delay_seconds: float = 0.2,
+    cache_path: Path | None = None,
+    runs_dir: Path | None = None,
+    sqlite_path: Path | None = None,
+) -> list[ResolvedReference]:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    tmp_dois_path = out_dir / f"{run_id}_doi_refs.txt"
+    ordered_dois: list[str] = []
+    seen: set[str] = set()
+    for ref in doi_refs:
+        if ref.ref_type != "doi":
+            continue
+        doi = ref.normalized_value.strip()
+        if not doi or doi in seen:
+            continue
+        seen.add(doi)
+        ordered_dois.append(doi)
+    _write_lines(tmp_dois_path, ordered_dois)
+
+    stats = resolve_dois_openalex(
+        dois_path=tmp_dois_path,
+        out_dir=out_dir,
+        user_agent=user_agent,
+        email=email,
+        api_key=api_key,
+        timeout_seconds=timeout_seconds,
+        max_retries=max_retries,
+        backoff_start_seconds=backoff_start_seconds,
+        backoff_cap_seconds=backoff_cap_seconds,
+        delay_seconds=delay_seconds,
+        cache_path=cache_path,
+        run_id=run_id,
+        runs_dir=runs_dir,
+        sqlite_path=sqlite_path,
+    )
+    resolved: list[ResolvedReference] = []
+    for line in stats.jsonl_path.read_text(encoding="utf-8").splitlines():
+        payload = json.loads(line)
+        doi = str(payload.get("doi", "")).strip()
+        if not doi:
+            continue
+        arxiv_id = payload.get("arxiv_id")
+        pdf_url = payload.get("pdf_url")
+        if isinstance(arxiv_id, str) and arxiv_id.strip():
+            doc_id = build_axv_doc_id(arxiv_id)
+            arxiv_value = arxiv_id
+        else:
+            doc_id = f"doi:{doi}"
+            arxiv_value = None
+        resolved.append(
+            ResolvedReference(
+                doc_id=doc_id,
+                arxiv_id=arxiv_value,
+                arxiv_id_with_version=arxiv_value,
+                doi=doi,
+                pdf_url=str(pdf_url) if isinstance(pdf_url, str) and pdf_url.strip() else None,
+                resolution_confidence=0.95 if arxiv_value else (0.75 if pdf_url else 0.30),
+                source_kind="openalex_resolved",
+            )
+        )
+    return resolved
 
 
 class ResolveDoisService:
@@ -413,6 +577,12 @@ class ResolveDoisService:
         cache_path: Path | None = None,
         tier_a_urls_path: Path = DEFAULT_TIER_A_OPENALEX_URLS_PATH,
         tier_a_arxiv_path: Path | None = None,
+        run_id: str | None = None,
+        runs_dir: Path | None = None,
+        sqlite_path: Path | None = None,
+        source_kind: str = "curated_repo",
+        candidate_retry_days: int = 14,
+        candidate_max_retries: int = 5,
     ) -> ResolveStats:
         return resolve_dois_openalex(
             dois_path=dois_path,
@@ -428,4 +598,10 @@ class ResolveDoisService:
             cache_path=cache_path,
             tier_a_urls_path=tier_a_urls_path,
             tier_a_arxiv_path=tier_a_arxiv_path,
+            run_id=run_id,
+            runs_dir=runs_dir,
+            sqlite_path=sqlite_path,
+            source_kind=source_kind,
+            candidate_retry_days=candidate_retry_days,
+            candidate_max_retries=candidate_max_retries,
         )

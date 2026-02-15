@@ -6,6 +6,7 @@ import re
 import time
 from collections import Counter
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import unquote, urljoin, urlparse
@@ -16,6 +17,8 @@ from cv_rag.ingest.arxiv_client import normalize_arxiv_id
 from cv_rag.seeding.awesome import extract_doi_matches
 from cv_rag.seeding.doi import normalize_doi
 from cv_rag.shared.http import http_request_with_retry
+from cv_rag.storage.repositories import ReferenceRecord, ResolvedReference, build_axv_doc_id
+from cv_rag.storage.sqlite import SQLiteStore
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +88,8 @@ class VisionBibSeedStats:
     tier_a_urls_path: Path
     tier_a_arxiv_path: Path
     page_counts: dict[str, int]
+    run_id: str | None = None
+    run_artifact_path: Path | None = None
 
     def top_pages(self, limit: int = 10) -> list[tuple[str, int]]:
         if limit <= 0:
@@ -274,6 +279,97 @@ def _write_records(path: Path, records: list[VisionBibLinkRecord]) -> None:
             file_handle.write("\n")
 
 
+def _build_reference_records(
+    *,
+    doi_records: list[VisionBibLinkRecord],
+    url_records: list[VisionBibLinkRecord],
+    arxiv_records: list[VisionBibLinkRecord],
+    discovered_at_unix: int,
+    source_kind: str,
+) -> tuple[list[ReferenceRecord], list[ResolvedReference]]:
+    refs: list[ReferenceRecord] = []
+    resolved: list[ResolvedReference] = []
+
+    for item in doi_records:
+        refs.append(
+            ReferenceRecord(
+                ref_type="doi",
+                normalized_value=item.normalized_value,
+                source_kind=source_kind,
+                source_ref=item.source_page_url,
+                discovered_at_unix=discovered_at_unix,
+            )
+        )
+    for item in url_records:
+        ref = ReferenceRecord(
+            ref_type="pdf_url",
+            normalized_value=item.normalized_value,
+            source_kind=source_kind,
+            source_ref=item.source_page_url,
+            discovered_at_unix=discovered_at_unix,
+        )
+        refs.append(ref)
+        resolved.append(
+            ResolvedReference(
+                doc_id=ref.doc_id,
+                arxiv_id=None,
+                arxiv_id_with_version=None,
+                doi=None,
+                pdf_url=item.normalized_value,
+                resolution_confidence=0.6,
+                source_kind="scraped_pdf",
+            )
+        )
+    for item in arxiv_records:
+        ref = ReferenceRecord(
+            ref_type="arxiv",
+            normalized_value=item.normalized_value,
+            source_kind=source_kind,
+            source_ref=item.source_page_url,
+            discovered_at_unix=discovered_at_unix,
+        )
+        refs.append(ref)
+        resolved.append(
+            ResolvedReference(
+                doc_id=build_axv_doc_id(item.normalized_value),
+                arxiv_id=item.normalized_value.split("v", 1)[0],
+                arxiv_id_with_version=item.normalized_value,
+                doi=None,
+                pdf_url=f"https://arxiv.org/pdf/{item.normalized_value}.pdf",
+                resolution_confidence=1.0,
+                source_kind=source_kind,
+            )
+        )
+    return refs, resolved
+
+
+def _write_run_reference_artifact(
+    *,
+    runs_dir: Path,
+    run_id: str,
+    refs: list[ReferenceRecord],
+) -> Path:
+    run_dir = runs_dir / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    path = run_dir / "visionbib_references.jsonl"
+    with path.open("w", encoding="utf-8") as file_handle:
+        for ref in refs:
+            file_handle.write(
+                json.dumps(
+                    {
+                        "ref_type": ref.ref_type,
+                        "normalized_value": ref.normalized_value,
+                        "source_kind": ref.source_kind,
+                        "source_ref": ref.source_ref,
+                        "discovered_at_unix": ref.discovered_at_unix,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            file_handle.write("\n")
+    return path
+
+
 def seed_visionbib_sources(
     *,
     sources_path: Path,
@@ -287,9 +383,18 @@ def seed_visionbib_sources(
     tier_a_dois_path: Path = DEFAULT_TIER_A_VISIONBIB_DOIS_PATH,
     tier_a_urls_path: Path = DEFAULT_TIER_A_VISIONBIB_URLS_PATH,
     tier_a_arxiv_path: Path = DEFAULT_TIER_A_VISIONBIB_ARXIV_PATH,
+    run_id: str | None = None,
+    runs_dir: Path | None = None,
+    sqlite_path: Path | None = None,
+    source_kind: str = "curated_repo",
+    candidate_retry_days: int = 14,
+    candidate_max_retries: int = 5,
 ) -> VisionBibSeedStats:
     spec = load_visionbib_sources(sources_path)
     targets = expand_page_urls(spec)
+    discovered_at_unix = int(time.time())
+    effective_run_id = run_id or datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    run_artifact_path: Path | None = None
 
     doi_records: list[VisionBibLinkRecord] = []
     url_records: list[VisionBibLinkRecord] = []
@@ -379,6 +484,33 @@ def seed_visionbib_sources(
     _write_lines(tier_a_urls_path, unique_urls)
     _write_lines(tier_a_arxiv_path, unique_arxiv)
 
+    refs, resolved = _build_reference_records(
+        doi_records=doi_records,
+        url_records=url_records,
+        arxiv_records=arxiv_records,
+        discovered_at_unix=discovered_at_unix,
+        source_kind=source_kind,
+    )
+    if runs_dir is not None:
+        run_artifact_path = _write_run_reference_artifact(
+            runs_dir=runs_dir,
+            run_id=effective_run_id,
+            refs=refs,
+        )
+    if sqlite_path is not None:
+        sqlite_store = SQLiteStore(sqlite_path)
+        try:
+            sqlite_store.create_schema()
+            sqlite_store.upsert_reference_graph(
+                refs=refs,
+                resolved=resolved,
+                run_id=effective_run_id,
+                candidate_retry_days=candidate_retry_days,
+                candidate_max_retries=candidate_max_retries,
+            )
+        finally:
+            sqlite_store.close()
+
     return VisionBibSeedStats(
         pages_requested=len(targets),
         pages_succeeded=pages_succeeded,
@@ -396,7 +528,56 @@ def seed_visionbib_sources(
         tier_a_urls_path=tier_a_urls_path,
         tier_a_arxiv_path=tier_a_arxiv_path,
         page_counts=dict(page_counts),
+        run_id=effective_run_id,
+        run_artifact_path=run_artifact_path,
     )
+
+
+def discover_visionbib_references(
+    *,
+    sources_path: Path,
+    run_id: str,
+    user_agent: str,
+    runs_dir: Path,
+    sqlite_path: Path | None = None,
+    timeout_seconds: float = 20.0,
+    max_retries: int = 5,
+    backoff_start_seconds: float = 1.0,
+    backoff_cap_seconds: float = 30.0,
+    delay_seconds: float = 0.2,
+) -> list[ReferenceRecord]:
+    out_dir = runs_dir / run_id
+    stats = seed_visionbib_sources(
+        sources_path=sources_path,
+        out_dir=out_dir,
+        user_agent=user_agent,
+        timeout_seconds=timeout_seconds,
+        max_retries=max_retries,
+        backoff_start_seconds=backoff_start_seconds,
+        backoff_cap_seconds=backoff_cap_seconds,
+        delay_seconds=delay_seconds,
+        tier_a_dois_path=out_dir / "tierA_dois_visionbib.txt",
+        tier_a_urls_path=out_dir / "tierA_urls_visionbib.txt",
+        tier_a_arxiv_path=out_dir / "tierA_arxiv_visionbib.txt",
+        run_id=run_id,
+        runs_dir=runs_dir,
+        sqlite_path=sqlite_path,
+    )
+    if stats.run_artifact_path is None or not stats.run_artifact_path.exists():
+        return []
+    refs: list[ReferenceRecord] = []
+    for line in stats.run_artifact_path.read_text(encoding="utf-8").splitlines():
+        payload = json.loads(line)
+        refs.append(
+            ReferenceRecord(
+                ref_type=str(payload["ref_type"]),
+                normalized_value=str(payload["normalized_value"]),
+                source_kind=str(payload["source_kind"]),
+                source_ref=str(payload["source_ref"]),
+                discovered_at_unix=int(payload["discovered_at_unix"]),
+            )
+        )
+    return refs
 
 
 class SeedVisionBibService:
@@ -414,6 +595,12 @@ class SeedVisionBibService:
         tier_a_dois_path: Path = DEFAULT_TIER_A_VISIONBIB_DOIS_PATH,
         tier_a_urls_path: Path = DEFAULT_TIER_A_VISIONBIB_URLS_PATH,
         tier_a_arxiv_path: Path = DEFAULT_TIER_A_VISIONBIB_ARXIV_PATH,
+        run_id: str | None = None,
+        runs_dir: Path | None = None,
+        sqlite_path: Path | None = None,
+        source_kind: str = "curated_repo",
+        candidate_retry_days: int = 14,
+        candidate_max_retries: int = 5,
     ) -> VisionBibSeedStats:
         return seed_visionbib_sources(
             sources_path=sources_path,
@@ -427,4 +614,10 @@ class SeedVisionBibService:
             tier_a_dois_path=tier_a_dois_path,
             tier_a_urls_path=tier_a_urls_path,
             tier_a_arxiv_path=tier_a_arxiv_path,
+            run_id=run_id,
+            runs_dir=runs_dir,
+            sqlite_path=sqlite_path,
+            source_kind=source_kind,
+            candidate_retry_days=candidate_retry_days,
+            candidate_max_retries=candidate_max_retries,
         )

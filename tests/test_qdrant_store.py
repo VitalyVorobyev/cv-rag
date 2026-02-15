@@ -117,6 +117,34 @@ def test_ensure_collection_handles_dict_vectors() -> None:
     client.create_collection.assert_not_called()
 
 
+def test_delete_collection_if_exists_returns_false_when_missing() -> None:
+    client = MagicMock()
+    collections_resp = MagicMock()
+    collections_resp.collections = []
+    client.get_collections.return_value = collections_resp
+    store = _make_store(client)
+
+    deleted = store.delete_collection_if_exists()
+
+    assert deleted is False
+    client.delete_collection.assert_not_called()
+
+
+def test_delete_collection_if_exists_deletes_and_returns_true() -> None:
+    client = MagicMock()
+    col = MagicMock()
+    col.name = "test_col"
+    collections_resp = MagicMock()
+    collections_resp.collections = [col]
+    client.get_collections.return_value = collections_resp
+    store = _make_store(client)
+
+    deleted = store.delete_collection_if_exists()
+
+    assert deleted is True
+    client.delete_collection.assert_called_once_with(collection_name="test_col")
+
+
 # ---------------------------------------------------------------------------
 # upsert
 # ---------------------------------------------------------------------------

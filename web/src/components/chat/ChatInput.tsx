@@ -9,11 +9,12 @@ interface Props {
 
 const MODES: { value: AnswerMode; label: string }[] = [
   { value: 'auto', label: 'Auto' },
-  { value: 'single', label: 'Single' },
+  { value: 'explain', label: 'Explain' },
   { value: 'compare', label: 'Compare' },
   { value: 'survey', label: 'Survey' },
   { value: 'implement', label: 'Implement' },
   { value: 'evidence', label: 'Evidence' },
+  { value: 'decision', label: 'Decision' },
 ];
 
 const DEFAULT_MODEL = 'mlx-community/Qwen2.5-7B-Instruct-4bit';

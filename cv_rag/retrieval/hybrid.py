@@ -23,10 +23,30 @@ TIER_SCORE_BOOSTS = {
     2: 0.0,
 }
 
+DEFAULT_PROVENANCE_BOOSTS = {
+    "curated": 0.08,
+    "canonical_api": 0.05,
+    "scraped": 0.02,
+}
+
 
 def format_citation(arxiv_id: str, section_title: str) -> str:
     """Compatibility re-export for call sites importing format_citation from hybrid."""
     return _format_citation(arxiv_id, section_title)
+
+
+def get_provenance_boost(
+    *,
+    doc_id: str,
+    sqlite_store: SQLiteStore,
+    provenance_boosts: dict[str, float] | None = None,
+) -> float:
+    boosts = provenance_boosts or DEFAULT_PROVENANCE_BOOSTS
+    by_doc = sqlite_store.get_doc_provenance_kinds([doc_id])
+    provenance_kind = by_doc.get(doc_id)
+    if provenance_kind is None:
+        return 0.0
+    return boosts.get(provenance_kind, 0.0)
 
 
 class HybridRetriever:
@@ -36,11 +56,13 @@ class HybridRetriever:
         qdrant_store: QdrantStore,
         sqlite_store: SQLiteStore,
         rrf_k: int = 60,
+        provenance_boosts: dict[str, float] | None = None,
     ) -> None:
         self.embedder = embedder
         self.qdrant_store = qdrant_store
         self.sqlite_store = sqlite_store
         self.rrf_k = rrf_k
+        self.provenance_boosts = provenance_boosts or dict(DEFAULT_PROVENANCE_BOOSTS)
 
     def retrieve(
         self,
@@ -74,6 +96,18 @@ class HybridRetriever:
             for item in by_id.values():
                 item.fused_score += TIER_SCORE_BOOSTS.get(tiers_by_arxiv.get(item.arxiv_id, 2), 0.0)
 
+        if by_id and hasattr(self.sqlite_store, "get_doc_provenance_kinds"):
+            doc_ids = sorted({chunk.doc_id for chunk in by_id.values() if chunk.doc_id})
+            if doc_ids:
+                provenance_by_doc = self.sqlite_store.get_doc_provenance_kinds(doc_ids)
+                for item in by_id.values():
+                    if not item.doc_id:
+                        continue
+                    provenance_kind = provenance_by_doc.get(item.doc_id)
+                    if provenance_kind is None:
+                        continue
+                    item.fused_score += self.provenance_boosts.get(provenance_kind, 0.0)
+
         ranked = sorted(by_id.values(), key=lambda item: item.fused_score, reverse=True)
         deduped = self._dedupe_ranked_chunks(ranked)
         quota_limited = self._apply_doc_quota(deduped, max_per_doc=max_per_doc)
@@ -106,11 +140,14 @@ class HybridRetriever:
                     section_title=str(hit.get("section_title", "")),
                     text=str(hit.get("text", "")),
                     fused_score=0.0,
+                    doc_id=str(hit["doc_id"]) if hit.get("doc_id") else None,
                 )
                 by_id[chunk_id] = item
 
             item.fused_score += fused
             item.sources.add(source)
+            if not item.doc_id and hit.get("doc_id"):
+                item.doc_id = str(hit["doc_id"])
             raw_score = hit.get(score_field)
             if source == "vector" and raw_score is not None:
                 item.vector_score = float(raw_score)
@@ -122,8 +159,9 @@ class HybridRetriever:
         deduped: list[RetrievedChunk] = []
         seen: set[tuple[str, str, str]] = set()
         for chunk in chunks:
+            doc_key = chunk.doc_id or chunk.arxiv_id
             key = (
-                chunk.arxiv_id,
+                doc_key,
                 chunk.section_title.strip().casefold(),
                 chunk.chunk_id,
             )
@@ -140,10 +178,11 @@ class HybridRetriever:
         out: list[RetrievedChunk] = []
         per_doc_counts: dict[str, int] = {}
         for chunk in chunks:
-            count = per_doc_counts.get(chunk.arxiv_id, 0)
+            doc_key = chunk.doc_id or chunk.arxiv_id
+            count = per_doc_counts.get(doc_key, 0)
             if count >= max_per_doc:
                 continue
-            per_doc_counts[chunk.arxiv_id] = count + 1
+            per_doc_counts[doc_key] = count + 1
             out.append(chunk)
         return out
 

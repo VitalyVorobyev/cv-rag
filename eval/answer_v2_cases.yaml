@@ -1,0 +1,14 @@
+cases:
+  - question: Explain LoFTR supervision and matching pipeline
+    must_include_arxiv_ids: ["2104.00680"]
+    must_include_tokens: ["loftr"]
+    min_sources: 4
+
+  - question: Compare LoFTR vs SuperGlue for local feature matching
+    must_include_arxiv_ids: ["2104.00680", "1911.11763"]
+    must_include_tokens: ["matching"]
+    min_sources: 6
+
+  - question: Which approach should I use for low-texture correspondence matching?
+    must_include_tokens: ["matching"]
+    min_sources: 6

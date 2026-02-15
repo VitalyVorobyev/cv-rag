@@ -24,6 +24,7 @@ def _chunks_to_response(chunks: list[RetrievedChunk]) -> list[ChunkResponse]:
     return [
         ChunkResponse(
             chunk_id=c.chunk_id,
+            doc_id=c.doc_id,
             arxiv_id=c.arxiv_id,
             title=c.title,
             section_title=c.section_title,
@@ -74,13 +75,15 @@ def answer_question(
                 route = data.get("route")
                 if isinstance(route, dict):
                     route_info = RouteInfo(**{
-                        "mode": str(route.get("mode", "single")),
+                        "mode": str(route.get("mode", "explain")),
                         "targets": list(route.get("targets", [])),
                         "k": int(route.get("k", 8)),
                         "max_per_doc": int(route.get("max_per_doc", 4)),
                         "confidence": float(route.get("confidence", 0.5)),
                         "notes": str(route.get("notes", "")),
                         "preface": route.get("preface"),
+                        "reason_codes": list(route.get("reason_codes", [])),
+                        "policy_version": str(route.get("policy_version", "v2")),
                     })
                 elif hasattr(route, "mode"):
                     route_info = RouteInfo(
@@ -91,16 +94,20 @@ def answer_question(
                         confidence=float(route.confidence),
                         notes=str(route.notes),
                         preface=route.preface,
+                        reason_codes=list(getattr(route, "reason_codes", [])),
+                        policy_version=str(getattr(route, "policy_version", "v2")),
                     )
                 else:
                     route_info = RouteInfo(
-                        mode="single",
+                        mode="explain",
                         targets=[],
                         k=8,
                         max_per_doc=4,
                         confidence=0.5,
                         notes="",
                         preface=None,
+                        reason_codes=[],
+                        policy_version="v2",
                     )
 
                 response = AnswerResponse(

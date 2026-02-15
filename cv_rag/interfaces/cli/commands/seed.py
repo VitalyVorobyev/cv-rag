@@ -34,6 +34,10 @@ def run_seed_awesome_command(
             delay_seconds=0.2,
             tier_a_arxiv_path=tier_a_arxiv,
             tier_a_dois_path=tier_a_dois,
+            runs_dir=settings.discovery_runs_dir,
+            sqlite_path=settings.sqlite_path,
+            candidate_retry_days=settings.candidate_retry_days,
+            candidate_max_retries=settings.candidate_max_retries,
         )
     except (OSError, ValueError, RuntimeError) as exc:
         console.print(f"[red]{exc}[/red]")
@@ -50,6 +54,9 @@ def run_seed_awesome_command(
     console.print(f"Tier-A arXiv (legacy): {stats.tier_a_seed_path}")
     console.print(f"Tier-A arXiv: {stats.tier_a_arxiv_path}")
     console.print(f"Tier-A DOIs: {stats.tier_a_dois_path}")
+    if stats.run_artifact_path is not None:
+        console.print(f"Run ID: {stats.run_id}")
+        console.print(f"Run artifact: {stats.run_artifact_path}")
 
     top_repos = stats.top_repos(limit=10)
     if top_repos:
@@ -99,6 +106,10 @@ def run_resolve_dois_command(
             delay_seconds=0.2,
             tier_a_urls_path=tier_a_urls,
             tier_a_arxiv_path=tier_a_arxiv_from_openalex,
+            runs_dir=settings.discovery_runs_dir,
+            sqlite_path=settings.sqlite_path,
+            candidate_retry_days=settings.candidate_retry_days,
+            candidate_max_retries=settings.candidate_max_retries,
         )
     except (OSError, ValueError, RuntimeError) as exc:
         console.print(f"[red]{exc}[/red]")
@@ -116,6 +127,9 @@ def run_resolve_dois_command(
         console.print(f"Recovered arXiv IDs from OpenAlex: {stats.resolved_arxiv_ids}")
         console.print(f"Tier-A arXiv-from-OpenAlex output: {stats.tier_a_arxiv_path}")
     console.print(f"Cache directory: {stats.cache_dir}")
+    if stats.run_artifact_path is not None:
+        console.print(f"Run ID: {stats.run_id}")
+        console.print(f"Run artifact: {stats.run_artifact_path}")
 
 
 def run_seed_visionbib_command(
@@ -141,6 +155,10 @@ def run_seed_visionbib_command(
             tier_a_dois_path=tier_a_dois,
             tier_a_urls_path=tier_a_urls,
             tier_a_arxiv_path=tier_a_arxiv,
+            runs_dir=settings.discovery_runs_dir,
+            sqlite_path=settings.sqlite_path,
+            candidate_retry_days=settings.candidate_retry_days,
+            candidate_max_retries=settings.candidate_max_retries,
         )
     except (OSError, ValueError, RuntimeError) as exc:
         console.print(f"[red]{exc}[/red]")
@@ -162,6 +180,9 @@ def run_seed_visionbib_command(
     console.print(f"Tier-A VisionBib DOIs: {stats.tier_a_dois_path}")
     console.print(f"Tier-A VisionBib URLs: {stats.tier_a_urls_path}")
     console.print(f"Tier-A VisionBib arXiv IDs: {stats.tier_a_arxiv_path}")
+    if stats.run_artifact_path is not None:
+        console.print(f"Run ID: {stats.run_id}")
+        console.print(f"Run artifact: {stats.run_artifact_path}")
 
     top_pages = stats.top_pages(limit=10)
     if top_pages:
