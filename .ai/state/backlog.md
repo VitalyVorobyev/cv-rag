@@ -4,15 +4,17 @@ Last updated: 2026-02-15
 
 ## In Progress
 
-### [TASK-011] Add AnswerService integration tests
-(none)
+### [TASK-012] Add IngestService integration tests
+- **Status**: implementing
+- **Priority**: low
+- **Packages**: `ingest/service.py`
+- **Spec**: `.ai/state/sessions/2026-02-15-TASK-012-spec.md`
+- **Handoff**: `.ai/state/sessions/2026-02-15-TASK-012-architect-implementer.md`
+- **Description**: No dedicated tests for `IngestService`. Test `ingest_latest`, `ingest_ids`, `ingest_jsonl` with injected fakes for arXiv fetchers and dedupe/migration hooks.
 
 ## Backlog
 
-### [TASK-012] Add IngestService integration tests
-- **Priority**: low
-- **Packages**: `ingest/service.py`
-- **Description**: No dedicated tests for `IngestService`. Test `ingest_latest`, `ingest_ids`, `ingest_jsonl` with monkeypatched arXiv client, GROBID, and stores.
+(none)
 
 ## Done
 
