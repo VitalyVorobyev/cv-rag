@@ -19,6 +19,7 @@ Optional flags:
 - `--skip-curate` to skip Semantic Scholar enrichment.
 - `--force-grobid` for full TEI reparsing during queue ingest.
 - `--embed-batch-size <n>` to override embedding batch size.
+- `--cache-only` to restore references from existing run artifacts and ingest only locally cached PDFs (no remote discovery/OpenAlex/PDF fetch).
 
 ## Behavior
 
@@ -32,6 +33,13 @@ Optional flags:
    - `corpus resolve-openalex`
    - `corpus ingest` loop until no ready candidates
    - `curate` (unless `--skip-curate`)
+
+In `--cache-only` mode:
+
+1. Discovery and OpenAlex resolution are skipped.
+2. Reference graph is restored from latest cached run artifacts in `data/curation/runs/` (or explicit `--cache-*-*` paths).
+3. Ingest runs in cache-only mode and blocks candidates whose PDFs are not already cached locally.
+4. Curation is skipped automatically.
 
 ## Report Artifact
 

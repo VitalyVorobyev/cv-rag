@@ -168,6 +168,8 @@ For pre-deployment local stores, run destructive reset + deterministic rebuild:
 
 ```bash
 uv run cv-rag migrate reset-reindex --yes --backup-dir data/backups
+# Cache-only variant: restore from local run artifacts + cached PDFs only
+uv run cv-rag migrate reset-reindex --yes --cache-only
 ```
 
 Legacy seeding commands were removed. Use `cv-rag corpus ...` commands only.

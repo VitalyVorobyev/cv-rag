@@ -483,6 +483,14 @@ def migrate_reset_reindex(
         "--skip-curate",
         help="Skip final curation step after corpus rebuild.",
     ),
+    cache_only: bool = typer.Option(
+        False,
+        "--cache-only",
+        help=(
+            "Do not fetch remote discovery/PDF data; restore references from cached run "
+            "artifacts and ingest local PDF cache only."
+        ),
+    ),
     awesome_sources: Path = typer.Option(
         Path("data/curation/awesome_sources.txt"),
         "--awesome-sources",
@@ -502,6 +510,21 @@ def migrate_reset_reindex(
         Path("data/curation"),
         "--openalex-out-dir",
         help="Output directory for OpenAlex artifacts.",
+    ),
+    cache_awesome_refs: Path | None = typer.Option(
+        None,
+        "--cache-awesome-refs",
+        help="Optional path to cached awesome references JSONL.",
+    ),
+    cache_visionbib_refs: Path | None = typer.Option(
+        None,
+        "--cache-visionbib-refs",
+        help="Optional path to cached VisionBib references JSONL.",
+    ),
+    cache_openalex_resolution: Path | None = typer.Option(
+        None,
+        "--cache-openalex-resolution",
+        help="Optional path to cached OpenAlex resolution JSONL.",
     ),
     ingest_batch_size: int = typer.Option(
         10,
@@ -532,10 +555,14 @@ def migrate_reset_reindex(
         yes=yes,
         backup_dir=backup_dir,
         skip_curate=skip_curate,
+        cache_only=cache_only,
         awesome_sources=awesome_sources,
         visionbib_sources=visionbib_sources,
         dois=dois,
         openalex_out_dir=openalex_out_dir,
+        cache_awesome_refs=cache_awesome_refs,
+        cache_visionbib_refs=cache_visionbib_refs,
+        cache_openalex_resolution=cache_openalex_resolution,
         ingest_batch_size=ingest_batch_size,
         force_grobid=force_grobid,
         embed_batch_size=embed_batch_size,
@@ -660,6 +687,11 @@ def corpus_ingest(
         None,
         help="Embedding batch size override.",
     ),
+    cache_only: bool = typer.Option(
+        False,
+        "--cache-only",
+        help="Do not download missing PDFs; ingest only documents already present in local cache.",
+    ),
 ) -> None:
     settings = get_settings()
     settings.ensure_directories()
@@ -669,6 +701,7 @@ def corpus_ingest(
         limit=limit,
         force_grobid=force_grobid,
         embed_batch_size=embed_batch_size,
+        cache_only=cache_only,
     )
 
 

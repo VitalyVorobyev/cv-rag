@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Callable, Generator
 from dataclasses import dataclass, field
@@ -16,6 +17,8 @@ from cv_rag.retrieval.models import RetrievedChunk
 from cv_rag.retrieval.relevance import extract_entity_like_tokens
 from cv_rag.shared.errors import CitationValidationError, GenerationError
 from cv_rag.shared.settings import Settings
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -206,6 +209,10 @@ class AnswerService:
             return
         except ValueError as exc:
             yield AnswerEvent(event="error", data={"message": str(exc)})
+            return
+        except Exception as exc:
+            logger.exception("Answer preparation failed")
+            yield AnswerEvent(event="error", data={"message": f"Answer preparation failed: {exc}"})
             return
 
         yield AnswerEvent(

@@ -326,3 +326,34 @@ def test_answer_service_stream_emits_error_for_compare_refusal(tmp_path: Path) -
     assert events[0].event == "error"
     error_payload = cast(dict[str, str], events[0].data)
     assert "Refusing to answer comparison" in error_payload["message"]
+
+
+def test_answer_service_stream_emits_error_for_unexpected_prepare_exception(tmp_path: Path) -> None:
+    class _BrokenRetriever:
+        def retrieve(self, **kwargs: object) -> list[RetrievedChunk]:
+            _ = kwargs
+            raise RuntimeError("qdrant collection missing")
+
+        def _is_irrelevant_result(
+            self,
+            query: str,
+            candidates: list[RetrievedChunk],
+            vector_score_threshold: float,
+        ) -> bool:
+            _ = query
+            _ = candidates
+            _ = vector_score_threshold
+            return False
+
+    service = AnswerService(
+        retriever=cast(Any, _BrokenRetriever()),
+        settings=_settings(tmp_path),
+        generate_fn=lambda **_: _valid_answer(),
+        stream_generate_fn=_empty_stream_generate,
+    )
+
+    events = list(service.stream(_request()))
+    assert len(events) == 1
+    assert events[0].event == "error"
+    payload = cast(dict[str, str], events[0].data)
+    assert "Answer preparation failed" in payload["message"]

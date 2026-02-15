@@ -54,6 +54,7 @@ class IngestPipeline:
         metadata_json_path: Path,
         force_grobid: bool = False,
         embed_batch_size: int | None = None,
+        cache_only: bool = False,
         on_progress: Callable[[int, int, PaperMetadata], None] | None = None,
     ) -> IngestResult:
         """Run the full ingest pipeline.
@@ -96,6 +97,7 @@ class IngestPipeline:
                         pdf_dir=settings.pdf_dir,
                         timeout_seconds=settings.http_timeout_seconds,
                         user_agent=settings.user_agent,
+                        cache_only=cache_only,
                     )
                     tei_path = settings.tei_dir / f"{paper.safe_file_stem()}.tei.xml"
                     tei_xml = load_tei_or_parse(

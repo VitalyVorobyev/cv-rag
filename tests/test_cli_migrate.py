@@ -96,8 +96,10 @@ def test_run_migrate_reset_reindex_creates_backup_orders_steps_and_writes_report
             candidates: list[object],
             force_grobid: bool = False,
             embed_batch_size: int | None = None,
+            cache_only: bool = False,
+            on_paper_progress: object | None = None,
         ) -> dict[str, int]:
-            _ = (candidates, force_grobid, embed_batch_size)
+            _ = (candidates, force_grobid, embed_batch_size, cache_only, on_paper_progress)
             return {
                 "selected": 1,
                 "queued": 1,
@@ -197,8 +199,10 @@ def test_run_migrate_reset_reindex_is_resumable_after_failure(
             candidates: list[object],
             force_grobid: bool = False,
             embed_batch_size: int | None = None,
+            cache_only: bool = False,
+            on_paper_progress: object | None = None,
         ) -> dict[str, int]:
-            _ = (candidates, force_grobid, embed_batch_size)
+            _ = (candidates, force_grobid, embed_batch_size, cache_only, on_paper_progress)
             return {"selected": 0, "queued": 0, "ingested": 0, "failed": 0, "blocked": 0}
 
     calls = {"n": 0}
@@ -247,3 +251,132 @@ def test_run_migrate_reset_reindex_is_resumable_after_failure(
     report_path = migrate_module.run_migrate_reset_reindex_command(**kwargs)
     success_report = json.loads(report_path.read_text(encoding="utf-8"))
     assert success_report["status"] == "ok"
+
+
+def test_run_migrate_reset_reindex_cache_only_restores_from_run_artifacts(
+    monkeypatch: object,
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    settings.ensure_directories()
+    runs_dir = settings.discovery_runs_dir
+    runs_dir.mkdir(parents=True, exist_ok=True)
+
+    awesome_run = runs_dir / "20260215T010000Z-awesome"
+    visionbib_run = runs_dir / "20260215T010000Z-visionbib"
+    openalex_run = runs_dir / "20260215T010000Z-openalex"
+    awesome_run.mkdir(parents=True, exist_ok=True)
+    visionbib_run.mkdir(parents=True, exist_ok=True)
+    openalex_run.mkdir(parents=True, exist_ok=True)
+
+    (awesome_run / "awesome_references.jsonl").write_text(
+        json.dumps(
+            {
+                "ref_type": "arxiv",
+                "normalized_value": "2104.00680v2",
+                "source_kind": "curated_repo",
+                "source_ref": "https://github.com/org/repo",
+                "discovered_at_unix": 1700000000,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (visionbib_run / "visionbib_references.jsonl").write_text(
+        json.dumps(
+            {
+                "ref_type": "pdf_url",
+                "normalized_value": "https://example.org/sample.pdf",
+                "source_kind": "curated_repo",
+                "source_ref": "https://visionbib.com",
+                "discovered_at_unix": 1700000001,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (openalex_run / "openalex_resolution.jsonl").write_text(
+        json.dumps(
+            {
+                "doc_id": "axv:2104.00680v2",
+                "arxiv_id": "2104.00680",
+                "arxiv_id_with_version": "2104.00680v2",
+                "doi": "10.1000/demo",
+                "pdf_url": "https://arxiv.org/pdf/2104.00680v2.pdf",
+                "resolution_confidence": 0.95,
+                "source_kind": "openalex_resolved",
+                "resolved_at_unix": 1700000002,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(migrate_module, "_preflight_checks", lambda **kwargs: {"ok": True})
+
+    class _NoopIngestService:
+        def __init__(self, settings: Settings) -> None:
+            _ = settings
+
+        def list_ready_candidates(self, *, limit: int) -> list[object]:
+            _ = limit
+            return []
+
+        def ingest_candidates(
+            self,
+            *,
+            candidates: list[object],
+            force_grobid: bool = False,
+            embed_batch_size: int | None = None,
+            cache_only: bool = False,
+            on_paper_progress: object | None = None,
+        ) -> dict[str, int]:
+            _ = (candidates, force_grobid, embed_batch_size, cache_only, on_paper_progress)
+            return {"selected": 0, "queued": 0, "ingested": 0, "failed": 0, "blocked": 0}
+
+    def _should_not_be_called(**kwargs: object) -> None:
+        _ = kwargs
+        raise AssertionError("network discovery/resolve should not run in cache-only mode")
+
+    report_path = migrate_module.run_migrate_reset_reindex_command(
+        settings=settings,
+        console=Console(record=True),
+        yes=True,
+        backup_dir=None,
+        skip_curate=False,
+        cache_only=True,
+        awesome_sources=tmp_path / "unused-awesome.txt",
+        visionbib_sources=tmp_path / "unused-visionbib.txt",
+        dois=tmp_path / "unused-dois.txt",
+        openalex_out_dir=tmp_path / "unused-openalex",
+        cache_awesome_refs=awesome_run / "awesome_references.jsonl",
+        cache_visionbib_refs=visionbib_run / "visionbib_references.jsonl",
+        cache_openalex_resolution=openalex_run / "openalex_resolution.jsonl",
+        ingest_batch_size=10,
+        force_grobid=False,
+        embed_batch_size=None,
+        max_ingest_loops=10,
+        run_discover_awesome_fn=_should_not_be_called,
+        run_discover_visionbib_fn=_should_not_be_called,
+        run_resolve_openalex_fn=_should_not_be_called,
+        run_curate_fn=_should_not_be_called,
+        ingest_service_cls=_NoopIngestService,
+        qdrant_store_cls=_FakeQdrantStore,
+    )
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["status"] == "ok"
+    assert [step["name"] for step in report["steps"]] == [
+        "preflight",
+        "backup_sqlite",
+        "reset_qdrant",
+        "reset_sqlite",
+        "restore_cached_references",
+        "ingest_queue",
+        "curate",
+    ]
+    assert report["steps"][-1]["details"]["reason"] == "cache_only_mode"
+
+    restored = next(step for step in report["steps"] if step["name"] == "restore_cached_references")
+    assert int(restored["details"]["refs_loaded"]) == 2
+    assert int(restored["details"]["resolved_loaded"]) == 1

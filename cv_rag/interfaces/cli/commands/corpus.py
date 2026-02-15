@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -156,6 +157,7 @@ def run_corpus_ingest_command(
     limit: int,
     force_grobid: bool,
     embed_batch_size: int | None,
+    cache_only: bool,
 ) -> None:
     service = IngestService(settings)
     candidates = service.list_ready_candidates(limit=limit)
@@ -163,14 +165,37 @@ def run_corpus_ingest_command(
         console.print("[yellow]No ready candidates in queue.[/yellow]")
         return
 
+    console.print(
+        f"[cyan]Starting queue ingest: selected {len(candidates)} candidate(s) (limit={limit})[/cyan]"
+    )
+    started_at = time.perf_counter()
+
+    def _on_paper_progress(index: int, total: int, paper: object) -> None:
+        paper_obj = paper
+        # Ingest callbacks emit PaperMetadata; keep runtime-safe in case of test doubles.
+        paper_id = getattr(paper_obj, "arxiv_id_with_version", None) or getattr(
+            paper_obj, "arxiv_id", None
+        )
+        if not paper_id:
+            resolver = getattr(paper_obj, "resolved_doc_id", None)
+            if callable(resolver):
+                paper_id = str(resolver())
+        if not paper_id:
+            paper_id = "<unknown>"
+        console.print(f"  [cyan][{index}/{total}] ingesting {paper_id}[/cyan]")
+
     stats = service.ingest_candidates(
         candidates=candidates,
         force_grobid=force_grobid,
         embed_batch_size=embed_batch_size,
+        cache_only=cache_only,
+        on_paper_progress=_on_paper_progress,
     )
+    elapsed_seconds = time.perf_counter() - started_at
     console.print("\n[bold green]Corpus ingest from queue complete[/bold green]")
     console.print(f"Selected candidates: {stats['selected']}")
     console.print(f"Queued for ingest: {stats['queued']}")
     console.print(f"Ingested: {stats['ingested']}")
     console.print(f"Failed: {stats['failed']}")
     console.print(f"Blocked: {stats['blocked']}")
+    console.print(f"Elapsed seconds: {elapsed_seconds:.1f}")

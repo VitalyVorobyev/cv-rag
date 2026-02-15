@@ -29,6 +29,7 @@ uv run cv-rag corpus resolve-openalex --dois data/curation/tierA_dois.txt --out-
 uv run cv-rag corpus queue --limit 25
 uv run cv-rag corpus ingest --limit 10
 uv run cv-rag migrate reset-reindex --yes --backup-dir data/backups
+uv run cv-rag migrate reset-reindex --yes --cache-only
 uv run cv-rag doctor
 uv run cv-rag curate --refresh-days 30
 

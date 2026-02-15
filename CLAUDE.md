@@ -23,11 +23,12 @@ uv run cv-rag ingest-ids 2104.00680 1911.11763 --no-skip-ingested
 uv run cv-rag ingest-jsonl --source data/curation/awesome_seed.jsonl --no-skip-ingested
 uv run cv-rag query "vision transformers"
 uv run cv-rag answer "vision transformers" --mode auto --model <mlx-model-path>
-uv run cv-rag seed-awesome --sources data/curation/awesome_sources.txt --out-dir data/curation
-uv run cv-rag seed awesome --sources data/curation/awesome_sources.txt --out-dir data/curation
-uv run cv-rag seed visionbib --sources data/curation/visionbib_sources.txt --out-dir data/curation/visionbib
-uv run cv-rag resolve-dois --dois data/curation/tierA_dois.txt --out-dir data/curation
-uv run cv-rag resolve-dois --dois data/curation/tierA_dois_visionbib.txt --out-dir data/curation/visionbib --tierA-arxiv-from-openalex data/curation/tierA_arxiv_openalex_visionbib.txt
+uv run cv-rag corpus discover-awesome --sources data/curation/awesome_sources.txt
+uv run cv-rag corpus discover-visionbib --sources data/curation/visionbib_sources.txt
+uv run cv-rag corpus resolve-openalex --dois data/curation/tierA_dois.txt --out-dir data/curation
+uv run cv-rag corpus queue --limit 25
+uv run cv-rag corpus ingest --limit 10
+uv run cv-rag migrate reset-reindex --yes --backup-dir data/backups
 uv run cv-rag doctor
 uv run cv-rag curate --refresh-days 30
 

@@ -22,6 +22,7 @@ from cv_rag.interfaces.cli.commands.corpus import (
 from cv_rag.interfaces.cli.commands.curate import run_curate_command
 from cv_rag.shared.settings import Settings
 from cv_rag.storage.qdrant import QdrantStore
+from cv_rag.storage.repositories import ReferenceRecord, ResolvedReference
 from cv_rag.storage.sqlite import SQLiteStore
 
 
@@ -59,6 +60,148 @@ def _bool_service_ok(url: str, *, timeout_seconds: float = 5.0) -> bool:
     return True
 
 
+def _latest_run_artifact(
+    *,
+    runs_dir: Path,
+    run_suffix: str,
+    artifact_name: str,
+) -> Path | None:
+    candidates = sorted(
+        [p for p in runs_dir.glob(f"*-{run_suffix}") if p.is_dir()],
+        key=lambda p: p.name,
+        reverse=True,
+    )
+    for run_dir in candidates:
+        artifact_path = run_dir / artifact_name
+        if artifact_path.exists():
+            return artifact_path
+    return None
+
+
+def _read_reference_records(path: Path) -> list[ReferenceRecord]:
+    refs: list[ReferenceRecord] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        payload = json.loads(line)
+        refs.append(
+            ReferenceRecord(
+                ref_type=str(payload["ref_type"]),
+                normalized_value=str(payload["normalized_value"]),
+                source_kind=str(payload["source_kind"]),
+                source_ref=str(payload["source_ref"]),
+                discovered_at_unix=int(payload["discovered_at_unix"]),
+            )
+        )
+    return refs
+
+
+def _read_resolution_records(path: Path) -> list[ResolvedReference]:
+    resolved: list[ResolvedReference] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        payload = json.loads(line)
+        resolved.append(
+            ResolvedReference(
+                doc_id=str(payload["doc_id"]),
+                arxiv_id=(
+                    str(payload["arxiv_id"])
+                    if isinstance(payload.get("arxiv_id"), str) and str(payload["arxiv_id"]).strip()
+                    else None
+                ),
+                arxiv_id_with_version=(
+                    str(payload["arxiv_id_with_version"])
+                    if isinstance(payload.get("arxiv_id_with_version"), str)
+                    and str(payload["arxiv_id_with_version"]).strip()
+                    else None
+                ),
+                doi=(
+                    str(payload["doi"])
+                    if isinstance(payload.get("doi"), str) and str(payload["doi"]).strip()
+                    else None
+                ),
+                pdf_url=(
+                    str(payload["pdf_url"])
+                    if isinstance(payload.get("pdf_url"), str) and str(payload["pdf_url"]).strip()
+                    else None
+                ),
+                resolution_confidence=float(payload.get("resolution_confidence", 0.0)),
+                source_kind=str(payload.get("source_kind", "openalex_resolved")),
+                resolved_at_unix=(
+                    int(payload["resolved_at_unix"])
+                    if payload.get("resolved_at_unix") is not None
+                    else None
+                ),
+            )
+        )
+    return resolved
+
+
+def _restore_cached_reference_graph(
+    *,
+    settings: Settings,
+    run_id: str,
+    awesome_refs_path: Path | None,
+    visionbib_refs_path: Path | None,
+    openalex_resolution_path: Path | None,
+    sqlite_store_cls: type[SQLiteStore],
+) -> dict[str, object]:
+    runs_dir = settings.discovery_runs_dir
+    use_awesome_refs = awesome_refs_path or _latest_run_artifact(
+        runs_dir=runs_dir,
+        run_suffix="awesome",
+        artifact_name="awesome_references.jsonl",
+    )
+    use_visionbib_refs = visionbib_refs_path or _latest_run_artifact(
+        runs_dir=runs_dir,
+        run_suffix="visionbib",
+        artifact_name="visionbib_references.jsonl",
+    )
+    use_openalex_resolved = openalex_resolution_path or _latest_run_artifact(
+        runs_dir=runs_dir,
+        run_suffix="openalex",
+        artifact_name="openalex_resolution.jsonl",
+    )
+
+    refs: list[ReferenceRecord] = []
+    resolved: list[ResolvedReference] = []
+    if use_awesome_refs is not None:
+        refs.extend(_read_reference_records(use_awesome_refs))
+    if use_visionbib_refs is not None:
+        refs.extend(_read_reference_records(use_visionbib_refs))
+    if use_openalex_resolved is not None:
+        resolved.extend(_read_resolution_records(use_openalex_resolved))
+
+    if not refs and not resolved:
+        raise FileNotFoundError(
+            "Cache-only migration could not find any run artifacts. "
+            "Provide --cache-awesome-refs / --cache-visionbib-refs / --cache-openalex-resolution "
+            "or ensure data/curation/runs has prior artifacts."
+        )
+
+    sqlite_store = sqlite_store_cls(settings.sqlite_path)
+    try:
+        sqlite_store.create_schema()
+        sqlite_store.upsert_reference_graph(
+            refs=refs,
+            resolved=resolved,
+            run_id=run_id,
+            candidate_retry_days=settings.candidate_retry_days,
+            candidate_max_retries=settings.candidate_max_retries,
+        )
+    finally:
+        sqlite_store.close()
+
+    return {
+        "refs_loaded": len(refs),
+        "resolved_loaded": len(resolved),
+        "awesome_refs_path": str(use_awesome_refs) if use_awesome_refs else None,
+        "visionbib_refs_path": str(use_visionbib_refs) if use_visionbib_refs else None,
+        "openalex_resolution_path": str(use_openalex_resolved) if use_openalex_resolved else None,
+    }
+
+
 def _preflight_checks(
     *,
     settings: Settings,
@@ -66,15 +209,29 @@ def _preflight_checks(
     visionbib_sources: Path,
     dois: Path,
     qdrant_store_cls: type[QdrantStore],
+    cache_only: bool = False,
+    awesome_refs_path: Path | None = None,
+    visionbib_refs_path: Path | None = None,
+    openalex_resolution_path: Path | None = None,
 ) -> dict[str, object]:
     missing_inputs: list[str] = []
-    for path in (awesome_sources, visionbib_sources, dois):
-        if not path.exists():
-            missing_inputs.append(str(path))
+    if cache_only:
+        for path in (awesome_refs_path, visionbib_refs_path, openalex_resolution_path):
+            if path is not None and not path.exists():
+                missing_inputs.append(str(path))
+        if not any((awesome_refs_path, visionbib_refs_path, openalex_resolution_path)):
+            runs_dir = settings.discovery_runs_dir
+            has_any = any(runs_dir.glob("*-awesome")) or any(runs_dir.glob("*-visionbib")) or any(
+                runs_dir.glob("*-openalex")
+            )
+            if not has_any:
+                missing_inputs.append(f"{runs_dir} (no prior run artifacts found)")
+    else:
+        for path in (awesome_sources, visionbib_sources, dois):
+            if not path.exists():
+                missing_inputs.append(str(path))
     if missing_inputs:
-        raise FileNotFoundError(
-            "Preflight failed; missing required input files: " + ", ".join(missing_inputs)
-        )
+        raise FileNotFoundError("Preflight failed; missing required inputs: " + ", ".join(missing_inputs))
 
     qdrant_store = qdrant_store_cls(settings.qdrant_url, settings.qdrant_collection)
     qdrant_store.client.get_collections()
@@ -152,8 +309,10 @@ def _run_ingest_queue(
     ingest_batch_size: int,
     force_grobid: bool,
     embed_batch_size: int | None,
+    cache_only: bool,
     max_ingest_loops: int,
     ingest_service_cls: type[IngestService],
+    console: Console | None = None,
 ) -> dict[str, object]:
     service = ingest_service_cls(settings)
 
@@ -173,18 +332,56 @@ def _run_ingest_queue(
 
         candidates = service.list_ready_candidates(limit=ingest_batch_size)
         if not candidates:
+            if console is not None:
+                console.print(
+                    f"[green]Ingest queue drained after {max(loops - 1, 0)} loop(s).[/green]"
+                )
             break
+
+        if console is not None:
+            console.print(
+                f"[cyan]Ingest loop {loops}: processing {len(candidates)} candidate(s) "
+                f"(limit={ingest_batch_size})[/cyan]"
+            )
+
+        def _on_paper_progress(index: int, total: int, paper: object) -> None:
+            if console is None:
+                return
+            paper_obj = paper
+            paper_id = getattr(paper_obj, "arxiv_id_with_version", None) or getattr(
+                paper_obj, "arxiv_id", None
+            )
+            if not paper_id:
+                resolver = getattr(paper_obj, "resolved_doc_id", None)
+                if callable(resolver):
+                    paper_id = str(resolver())
+            if not paper_id:
+                paper_id = "<unknown>"
+            console.print(f"  [cyan][{index}/{total}] ingesting {paper_id}[/cyan]")
 
         stats = service.ingest_candidates(
             candidates=candidates,
             force_grobid=force_grobid,
             embed_batch_size=embed_batch_size,
+            cache_only=cache_only,
+            on_paper_progress=_on_paper_progress,
         )
         selected_total += int(stats.get("selected", 0))
         queued_total += int(stats.get("queued", 0))
         ingested_total += int(stats.get("ingested", 0))
         failed_total += int(stats.get("failed", 0))
         blocked_total += int(stats.get("blocked", 0))
+        if console is not None:
+            console.print(
+                f"[green]Loop {loops} done:[/green] queued={int(stats.get('queued', 0))}, "
+                f"ingested={int(stats.get('ingested', 0))}, failed={int(stats.get('failed', 0))}, "
+                f"blocked={int(stats.get('blocked', 0))}"
+            )
+            console.print(
+                "         cumulative: "
+                f"queued={queued_total}, ingested={ingested_total}, "
+                f"failed={failed_total}, blocked={blocked_total}"
+            )
 
     return {
         "loops": loops - 1,
@@ -210,10 +407,14 @@ def run_migrate_reset_reindex_command(
     yes: bool,
     backup_dir: Path | None,
     skip_curate: bool,
+    cache_only: bool = False,
     awesome_sources: Path,
     visionbib_sources: Path,
     dois: Path,
     openalex_out_dir: Path,
+    cache_awesome_refs: Path | None = None,
+    cache_visionbib_refs: Path | None = None,
+    cache_openalex_resolution: Path | None = None,
     ingest_batch_size: int,
     force_grobid: bool,
     embed_batch_size: int | None,
@@ -242,30 +443,36 @@ def run_migrate_reset_reindex_command(
     status = "ok"
 
     def _run_step(name: str, fn: object) -> dict[str, object]:
+        step_number = len(steps) + 1
+        console.print(f"\n[bold cyan]Step {step_number}: {name}[/bold cyan]")
         t0 = time.perf_counter()
         try:
             details = fn()  # type: ignore[operator]
             if details is None:
                 details = {}
             details_dict = dict(details)
+            duration = round(time.perf_counter() - t0, 3)
             steps.append(
                 MigrationStep(
                     name=name,
                     status="ok",
-                    duration_seconds=round(time.perf_counter() - t0, 3),
+                    duration_seconds=duration,
                     details=details_dict,
                 )
             )
+            console.print(f"[green]Step {name} completed in {duration:.3f}s[/green]")
             return details_dict
         except Exception as exc:
+            duration = round(time.perf_counter() - t0, 3)
             steps.append(
                 MigrationStep(
                     name=name,
                     status="fail",
-                    duration_seconds=round(time.perf_counter() - t0, 3),
+                    duration_seconds=duration,
                     details={"error": str(exc)},
                 )
             )
+            console.print(f"[red]Step {name} failed after {duration:.3f}s: {exc}[/red]")
             raise
 
     try:
@@ -277,6 +484,10 @@ def run_migrate_reset_reindex_command(
                 visionbib_sources=visionbib_sources,
                 dois=dois,
                 qdrant_store_cls=qdrant_store_cls,
+                cache_only=cache_only,
+                awesome_refs_path=cache_awesome_refs,
+                visionbib_refs_path=cache_visionbib_refs,
+                openalex_resolution_path=cache_openalex_resolution,
             ),
         )
 
@@ -305,36 +516,49 @@ def run_migrate_reset_reindex_command(
             lambda: _reset_sqlite(sqlite_path=settings.sqlite_path, sqlite_store_cls=sqlite_store_cls),
         )
 
-        _run_step(
-            "discover_awesome",
-            lambda: run_discover_awesome_fn(  # type: ignore[operator]
-                settings=settings,
-                console=console,
-                sources=awesome_sources,
-                run_id=f"{run_id}-awesome",
-            ),
-        )
-        _run_step(
-            "discover_visionbib",
-            lambda: run_discover_visionbib_fn(  # type: ignore[operator]
-                settings=settings,
-                console=console,
-                sources=visionbib_sources,
-                run_id=f"{run_id}-visionbib",
-            ),
-        )
-        _run_step(
-            "resolve_openalex",
-            lambda: run_resolve_openalex_fn(  # type: ignore[operator]
-                settings=settings,
-                console=console,
-                dois=dois,
-                out_dir=openalex_out_dir,
-                run_id=f"{run_id}-openalex",
-                email=None,
-                api_key=os.getenv("OPENALEX_API_KEY"),
-            ),
-        )
+        if cache_only:
+            _run_step(
+                "restore_cached_references",
+                lambda: _restore_cached_reference_graph(
+                    settings=settings,
+                    run_id=f"{run_id}-cache-restore",
+                    awesome_refs_path=cache_awesome_refs,
+                    visionbib_refs_path=cache_visionbib_refs,
+                    openalex_resolution_path=cache_openalex_resolution,
+                    sqlite_store_cls=sqlite_store_cls,
+                ),
+            )
+        else:
+            _run_step(
+                "discover_awesome",
+                lambda: run_discover_awesome_fn(  # type: ignore[operator]
+                    settings=settings,
+                    console=console,
+                    sources=awesome_sources,
+                    run_id=f"{run_id}-awesome",
+                ),
+            )
+            _run_step(
+                "discover_visionbib",
+                lambda: run_discover_visionbib_fn(  # type: ignore[operator]
+                    settings=settings,
+                    console=console,
+                    sources=visionbib_sources,
+                    run_id=f"{run_id}-visionbib",
+                ),
+            )
+            _run_step(
+                "resolve_openalex",
+                lambda: run_resolve_openalex_fn(  # type: ignore[operator]
+                    settings=settings,
+                    console=console,
+                    dois=dois,
+                    out_dir=openalex_out_dir,
+                    run_id=f"{run_id}-openalex",
+                    email=None,
+                    api_key=os.getenv("OPENALEX_API_KEY"),
+                ),
+            )
 
         _run_step(
             "ingest_queue",
@@ -343,13 +567,16 @@ def run_migrate_reset_reindex_command(
                 ingest_batch_size=ingest_batch_size,
                 force_grobid=force_grobid,
                 embed_batch_size=embed_batch_size,
+                cache_only=cache_only,
                 max_ingest_loops=max_ingest_loops,
                 ingest_service_cls=ingest_service_cls,
+                console=console,
             ),
         )
 
-        if skip_curate:
-            _run_step("curate", lambda: {"skipped": True})
+        if skip_curate or cache_only:
+            reason = "cache_only_mode" if cache_only and not skip_curate else "skip_flag"
+            _run_step("curate", lambda: {"skipped": True, "reason": reason})
         else:
             _run_step(
                 "curate",

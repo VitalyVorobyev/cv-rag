@@ -91,9 +91,10 @@ def test_ingest_candidates_transitions_ingested_failed_and_blocked(
             metadata_json_path: Path,
             force_grobid: bool = False,
             embed_batch_size: int | None = None,
+            cache_only: bool = False,
             on_progress: object | None = None,
         ) -> IngestResult:
-            _ = (metadata_json_path, force_grobid, embed_batch_size, on_progress)
+            _ = (metadata_json_path, force_grobid, embed_batch_size, cache_only, on_progress)
             captured_doc_ids.extend([paper.resolved_doc_id() for paper in papers])
             return IngestResult(
                 papers_processed=len(papers),
@@ -189,8 +190,9 @@ def test_pipeline_indexes_url_doc_chunks_with_doc_id(
         pdf_dir: Path,
         timeout_seconds: float,
         user_agent: str,
+        cache_only: bool = False,
     ) -> Path:
-        _ = (timeout_seconds, user_agent)
+        _ = (timeout_seconds, user_agent, cache_only)
         pdf_dir.mkdir(parents=True, exist_ok=True)
         path = pdf_dir / f"{paper.safe_file_stem()}.pdf"
         path.write_bytes(b"%PDF-1.4\n")

@@ -69,6 +69,8 @@ def ingest_candidates(
     candidates: list[IngestCandidate],
     force_grobid: bool = False,
     embed_batch_size: int | None = None,
+    cache_only: bool = False,
+    on_paper_progress: Callable[[int, int, PaperMetadata], None] | None = None,
 ) -> dict[str, int]:
     """Ingest queued candidates with available fulltext."""
     sqlite_store = SQLiteStore(settings.sqlite_path)
@@ -107,22 +109,33 @@ def ingest_candidates(
                 else pdf_url
             )
 
-            papers.append(
-                PaperMetadata(
-                    arxiv_id=arxiv_id,
-                    arxiv_id_with_version=arxiv_id_with_version,
-                    version=None,
-                    doc_id=candidate.doc_id,
-                    provenance_kind=provenance_kind,
-                    title=str(doc.get("doi") or candidate.doc_id),
-                    summary="",
-                    published=None,
-                    updated=None,
-                    authors=[],
-                    pdf_url=pdf_url,
-                    abs_url=abs_url,
-                )
+            paper = PaperMetadata(
+                arxiv_id=arxiv_id,
+                arxiv_id_with_version=arxiv_id_with_version,
+                version=None,
+                doc_id=candidate.doc_id,
+                provenance_kind=provenance_kind,
+                title=str(doc.get("doi") or candidate.doc_id),
+                summary="",
+                published=None,
+                updated=None,
+                authors=[],
+                pdf_url=pdf_url,
+                abs_url=abs_url,
             )
+            if cache_only:
+                cached_pdf_path = settings.pdf_dir / f"{paper.safe_file_stem()}.pdf"
+                if not cached_pdf_path.exists():
+                    mark_candidate_result(
+                        sqlite_store=sqlite_store,
+                        settings=settings,
+                        doc_id=candidate.doc_id,
+                        status="blocked",
+                        reason="cache_only_missing_pdf",
+                    )
+                    blocked += 1
+                    continue
+            papers.append(paper)
 
         if not papers:
             return {
@@ -140,6 +153,8 @@ def ingest_candidates(
             metadata_json_path=metadata_path,
             force_grobid=force_grobid,
             embed_batch_size=embed_batch_size,
+            cache_only=cache_only,
+            on_progress=on_paper_progress,
         )
         failed_prefixes: set[str] = set()
         for failure in result.failed_papers:
@@ -365,10 +380,14 @@ class IngestService:
         candidates: list[IngestCandidate],
         force_grobid: bool = False,
         embed_batch_size: int | None = None,
+        cache_only: bool = False,
+        on_paper_progress: Callable[[int, int, PaperMetadata], None] | None = None,
     ) -> dict[str, int]:
         return ingest_candidates(
             settings=self.settings,
             candidates=candidates,
             force_grobid=force_grobid,
             embed_batch_size=embed_batch_size,
+            cache_only=cache_only,
+            on_paper_progress=on_paper_progress,
         )
