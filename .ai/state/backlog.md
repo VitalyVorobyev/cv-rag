@@ -4,14 +4,15 @@ Last updated: 2026-02-15
 
 ## In Progress
 
-(none)
-
-## Backlog
-
 ### [TASK-011] Add AnswerService integration tests
+- **Status**: implementing
 - **Priority**: medium
 - **Packages**: `answer/service.py`
+- **Spec**: `.ai/state/sessions/2026-02-15-TASK-011-spec.md`
+- **Handoff**: `.ai/state/sessions/2026-02-15-TASK-011-architect-implementer.md`
 - **Description**: No dedicated tests for `AnswerService.run()` or `.stream()`. Test the full flow: prepare → route → retrieve → generate → validate. Monkeypatch retriever and MLX runner.
+
+## Backlog
 
 ### [TASK-012] Add IngestService integration tests
 - **Priority**: low
