@@ -8,11 +8,6 @@ Last updated: 2026-02-15
 
 ## Backlog
 
-### [TASK-010] Add MLX runner tests
-- **Priority**: medium
-- **Packages**: `answer/mlx_runner.py`
-- **Description**: No tests for subprocess-based generation. Test `mlx_generate` and `mlx_generate_stream` with monkeypatched `subprocess.run`/`Popen`. Test error paths (missing runtime, empty output).
-
 ### [TASK-011] Add AnswerService integration tests
 - **Priority**: medium
 - **Packages**: `answer/service.py`
@@ -88,3 +83,8 @@ Last updated: 2026-02-15
 - **Completed**: 2026-02-15
 - **Test file**: `tests/test_embeddings.py` (19 tests)
 - **Description**: Batch/legacy endpoints, model fallback, error extraction, batch splitting
+
+### [TASK-010] Add MLX runner tests
+- **Completed**: 2026-02-15
+- **Test file**: `tests/test_mlx_runner.py` (11 tests)
+- **Description**: Subprocess wrapper tests for `mlx_generate`, `mlx_generate_stream`, and `sse_event` (success + error paths).
