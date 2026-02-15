@@ -25,7 +25,9 @@ uv run cv-rag query "vision transformers"
 uv run cv-rag answer "vision transformers" --mode auto --model <mlx-model-path>
 uv run cv-rag seed-awesome --sources data/curation/awesome_sources.txt --out-dir data/curation
 uv run cv-rag seed awesome --sources data/curation/awesome_sources.txt --out-dir data/curation
+uv run cv-rag seed visionbib --sources data/curation/visionbib_sources.txt --out-dir data/curation/visionbib
 uv run cv-rag resolve-dois --dois data/curation/tierA_dois.txt --out-dir data/curation
+uv run cv-rag resolve-dois --dois data/curation/tierA_dois_visionbib.txt --out-dir data/curation/visionbib --tierA-arxiv-from-openalex data/curation/tierA_arxiv_openalex_visionbib.txt
 uv run cv-rag doctor
 uv run cv-rag curate --refresh-days 30
 
@@ -51,6 +53,8 @@ uv run cv-rag -v ingest --limit 5
 ```
 
 `ingest`, `ingest-ids`, and `ingest-jsonl` all default to exact-version dedupe (`--skip-ingested`) and can be overridden with `--no-skip-ingested`. For unversioned explicit IDs, cv-rag attempts version resolution first and continues best-effort with a warning if unresolved.
+`seed visionbib` reads a VisionBib prefix + page range spec and emits dedicated DOI/PDF/arXiv seed artifacts.
+`resolve-dois` can optionally export recovered arXiv IDs from OpenAlex via `--tierA-arxiv-from-openalex`.
 
 ## Architecture
 

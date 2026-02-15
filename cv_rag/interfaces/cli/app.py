@@ -50,7 +50,11 @@ from cv_rag.interfaces.cli.commands.ingest import (
     run_ingest_jsonl_command,
 )
 from cv_rag.interfaces.cli.commands.query import run_query_command
-from cv_rag.interfaces.cli.commands.seed import run_resolve_dois_command, run_seed_awesome_command
+from cv_rag.interfaces.cli.commands.seed import (
+    run_resolve_dois_command,
+    run_seed_awesome_command,
+    run_seed_visionbib_command,
+)
 from cv_rag.interfaces.cli.commands.serve import run_serve_command
 from cv_rag.interfaces.cli.commands.stats import run_stats_command
 from cv_rag.retrieval.hybrid import (
@@ -62,6 +66,12 @@ from cv_rag.seeding.awesome import (
 )
 from cv_rag.seeding.openalex import (
     DEFAULT_TIER_A_OPENALEX_URLS_PATH,
+)
+from cv_rag.seeding.visionbib import (
+    DEFAULT_TIER_A_VISIONBIB_ARXIV_PATH,
+    DEFAULT_TIER_A_VISIONBIB_DOIS_PATH,
+    DEFAULT_TIER_A_VISIONBIB_URLS_PATH,
+    DEFAULT_VISIONBIB_OUT_DIR,
 )
 from cv_rag.shared.settings import get_settings
 from cv_rag.storage.qdrant import QdrantStore
@@ -342,6 +352,45 @@ def seed_awesome(
     )
 
 
+@seed_app.command("visionbib")
+def seed_visionbib(
+    sources: Path = typer.Option(
+        ...,
+        "--sources",
+        help="Path to VisionBib source file (prefix URL + page ranges).",
+    ),
+    out_dir: Path = typer.Option(
+        DEFAULT_VISIONBIB_OUT_DIR,
+        "--out-dir",
+        help="Output directory for VisionBib JSONL seed files.",
+    ),
+    tier_a_dois: Path = typer.Option(
+        DEFAULT_TIER_A_VISIONBIB_DOIS_PATH,
+        "--tierA-dois",
+        help="Path for VisionBib DOI seed file.",
+    ),
+    tier_a_urls: Path = typer.Option(
+        DEFAULT_TIER_A_VISIONBIB_URLS_PATH,
+        "--tierA-urls",
+        help="Path for VisionBib direct PDF URL seed file.",
+    ),
+    tier_a_arxiv: Path = typer.Option(
+        DEFAULT_TIER_A_VISIONBIB_ARXIV_PATH,
+        "--tierA-arxiv",
+        help="Path for explicit VisionBib arXiv seed file.",
+    ),
+) -> None:
+    run_seed_visionbib_command(
+        settings=get_settings(),
+        console=console,
+        sources=sources,
+        out_dir=out_dir,
+        tier_a_dois=tier_a_dois,
+        tier_a_urls=tier_a_urls,
+        tier_a_arxiv=tier_a_arxiv,
+    )
+
+
 @app.command("seed-awesome")
 def seed_awesome_root(
     sources: Path = typer.Option(
@@ -402,6 +451,11 @@ def resolve_dois(
         "--tierA-urls",
         help="Path to write resolved OpenAlex OA PDF URLs.",
     ),
+    tier_a_arxiv_from_openalex: Path | None = typer.Option(
+        None,
+        "--tierA-arxiv-from-openalex",
+        help="Optional path to write arXiv IDs recovered from OpenAlex DOI metadata.",
+    ),
     email: str | None = typer.Option(
         None,
         "--email",
@@ -416,6 +470,7 @@ def resolve_dois(
         user_agent=user_agent,
         api_key_env=api_key_env,
         tier_a_urls=tier_a_urls,
+        tier_a_arxiv_from_openalex=tier_a_arxiv_from_openalex,
         email=email,
     )
 

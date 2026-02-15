@@ -12,6 +12,7 @@ from urllib.parse import quote
 
 import httpx
 
+from cv_rag.ingest.arxiv_client import normalize_arxiv_id
 from cv_rag.seeding.doi import normalize_doi
 from cv_rag.shared.http import http_request_with_retry
 
@@ -34,6 +35,7 @@ class OpenAlexOAFields:
 class OpenAlexResolvedRecord:
     doi: str
     openalex_id: str | None
+    arxiv_id: str | None
     is_oa: bool | None
     pdf_url: str | None
     landing_page_url: str | None
@@ -45,6 +47,7 @@ class OpenAlexResolvedRecord:
         return {
             "doi": self.doi,
             "openalex_id": self.openalex_id,
+            "arxiv_id": self.arxiv_id,
             "is_oa": self.is_oa,
             "pdf_url": self.pdf_url,
             "landing_page_url": self.landing_page_url,
@@ -59,10 +62,12 @@ class ResolveStats:
     dois_processed: int
     resolved_records: int
     resolved_pdf_urls: int
+    resolved_arxiv_ids: int
     unresolved: int
     cache_hits: int
     jsonl_path: Path
     tier_a_urls_path: Path
+    tier_a_arxiv_path: Path | None
     cache_dir: Path
 
 
@@ -153,6 +158,17 @@ def extract_openalex_oa_fields(work: dict[str, Any]) -> OpenAlexOAFields:
         is_oa=_location_is_oa(fallback_location),
         source="none",
     )
+
+
+def extract_openalex_arxiv_id(work: dict[str, Any]) -> str | None:
+    ids = work.get("ids")
+    if not isinstance(ids, dict):
+        return None
+    raw_arxiv = _normalize_optional_text(ids.get("arxiv"))
+    if not raw_arxiv:
+        return None
+    normalized = normalize_arxiv_id(raw_arxiv)
+    return normalized or None
 
 
 def load_dois(path: Path) -> list[str]:
@@ -281,6 +297,7 @@ def resolve_dois_openalex(
     delay_seconds: float = 0.2,
     cache_path: Path | None = None,
     tier_a_urls_path: Path = DEFAULT_TIER_A_OPENALEX_URLS_PATH,
+    tier_a_arxiv_path: Path | None = None,
 ) -> ResolveStats:
     dois = load_dois(dois_path)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -297,6 +314,7 @@ def resolve_dois_openalex(
     resolved_records = 0
     unresolved = 0
     resolved_pdf_by_doi: dict[str, str] = {}
+    resolved_arxiv_by_doi: dict[str, str] = {}
 
     with (
         httpx.Client(timeout=timeout_seconds, headers=headers, follow_redirects=True) as client,
@@ -326,9 +344,11 @@ def resolve_dois_openalex(
                 continue
 
             oa_fields = extract_openalex_oa_fields(work_json)
+            arxiv_id = extract_openalex_arxiv_id(work_json)
             record = OpenAlexResolvedRecord(
                 doi=doi,
                 openalex_id=_normalize_optional_text(work_json.get("id")),
+                arxiv_id=arxiv_id,
                 is_oa=oa_fields.is_oa,
                 pdf_url=oa_fields.pdf_url,
                 landing_page_url=oa_fields.landing_page_url,
@@ -342,6 +362,8 @@ def resolve_dois_openalex(
 
             if record.pdf_url:
                 resolved_pdf_by_doi[doi] = record.pdf_url
+            if record.arxiv_id:
+                resolved_arxiv_by_doi[doi] = record.arxiv_id
 
     sorted_pdf_urls_by_doi = sorted(resolved_pdf_by_doi.items(), key=lambda item: item[0])
     unique_urls: list[str] = []
@@ -352,15 +374,24 @@ def resolve_dois_openalex(
         seen_urls.add(pdf_url)
         unique_urls.append(pdf_url)
 
+    unique_arxiv: list[str] = []
+    if tier_a_arxiv_path is not None:
+        unique_arxiv = sorted(set(resolved_arxiv_by_doi.values()))
+
     _write_lines(tier_a_urls_path, unique_urls)
+    if tier_a_arxiv_path is not None:
+        _write_lines(tier_a_arxiv_path, unique_arxiv)
+
     return ResolveStats(
         dois_processed=len(dois),
         resolved_records=resolved_records,
         resolved_pdf_urls=len(unique_urls),
+        resolved_arxiv_ids=len(unique_arxiv),
         unresolved=unresolved,
         cache_hits=cache_hits,
         jsonl_path=jsonl_path,
         tier_a_urls_path=tier_a_urls_path,
+        tier_a_arxiv_path=tier_a_arxiv_path,
         cache_dir=cache_dir,
     )
 
@@ -381,6 +412,7 @@ class ResolveDoisService:
         delay_seconds: float = 0.2,
         cache_path: Path | None = None,
         tier_a_urls_path: Path = DEFAULT_TIER_A_OPENALEX_URLS_PATH,
+        tier_a_arxiv_path: Path | None = None,
     ) -> ResolveStats:
         return resolve_dois_openalex(
             dois_path=dois_path,
@@ -395,4 +427,5 @@ class ResolveDoisService:
             delay_seconds=delay_seconds,
             cache_path=cache_path,
             tier_a_urls_path=tier_a_urls_path,
+            tier_a_arxiv_path=tier_a_arxiv_path,
         )

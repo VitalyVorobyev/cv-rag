@@ -202,6 +202,40 @@ uv run cv-rag resolve-dois \
   --out-dir data/curation
 ```
 
+### Seed from VisionBib page ranges
+
+`visionbib_sources.txt` format:
+- first non-comment line: base prefix URL
+- following lines:
+  - `stem start end` (inclusive), or
+  - `stemStart stemEnd` (inclusive)
+
+Example:
+
+```text
+https://www.visionbib.com/bibliography/
+compute 42 114
+twod266 twod336
+```
+
+Run seeding:
+
+```bash
+uv run cv-rag seed visionbib \
+  --sources data/curation/visionbib_sources.txt \
+  --out-dir data/curation/visionbib
+```
+
+Resolve VisionBib DOI seeds and recover arXiv IDs from OpenAlex metadata:
+
+```bash
+uv run cv-rag resolve-dois \
+  --dois data/curation/tierA_dois_visionbib.txt \
+  --out-dir data/curation/visionbib \
+  --tierA-urls data/curation/tierA_urls_openalex_visionbib.txt \
+  --tierA-arxiv-from-openalex data/curation/tierA_arxiv_openalex_visionbib.txt
+```
+
 Seeding outputs:
 
 * `data/curation/awesome_seed.jsonl` (arXiv provenance)
@@ -221,6 +255,15 @@ OpenAlex resolution outputs:
 * `data/curation/openalex_resolved.jsonl`
 * `data/curation/tierA_urls_openalex.txt`
 * `data/curation/openalex_cache/` (response cache)
+
+VisionBib seeding outputs (dedicated):
+
+* `data/curation/visionbib/visionbib_seed_doi.jsonl`
+* `data/curation/visionbib/visionbib_seed_url.jsonl`
+* `data/curation/visionbib/visionbib_seed_arxiv.jsonl`
+* `data/curation/tierA_dois_visionbib.txt`
+* `data/curation/tierA_urls_visionbib.txt`
+* `data/curation/tierA_arxiv_visionbib.txt`
 
 ### Curate corpus tiers (Semantic Scholar metadata)
 
