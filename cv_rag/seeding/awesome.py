@@ -6,6 +6,7 @@ import re
 import time
 from collections import Counter
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -13,6 +14,8 @@ import httpx
 
 from cv_rag.seeding.doi import DOI_TRAILING_CHARS, normalize_doi
 from cv_rag.shared.http import http_request_with_retry
+from cv_rag.storage.repositories import ReferenceRecord
+from cv_rag.storage.sqlite import SQLiteStore
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +126,8 @@ class AwesomeSeedStats:
     doi_jsonl_path: Path
     tier_a_arxiv_path: Path
     tier_a_dois_path: Path
+    run_id: str | None = None
+    run_artifact_path: Path | None = None
 
     def top_repos(self, limit: int = 10) -> list[tuple[str, int]]:
         if limit <= 0:
@@ -391,6 +396,64 @@ def write_seed_outputs(
     )
 
 
+def _reference_records_from_seed_records(
+    *,
+    arxiv_records: list[AwesomeSeedRecord],
+    doi_records: list[AwesomeDoiSeedRecord],
+    discovered_at_unix: int,
+    source_kind: str,
+) -> list[ReferenceRecord]:
+    refs: list[ReferenceRecord] = []
+    for item in arxiv_records:
+        refs.append(
+            ReferenceRecord(
+                ref_type="arxiv",
+                normalized_value=item.arxiv_id,
+                source_kind=source_kind,
+                source_ref=item.source_url,
+                discovered_at_unix=discovered_at_unix,
+            )
+        )
+    for item in doi_records:
+        refs.append(
+            ReferenceRecord(
+                ref_type="doi",
+                normalized_value=item.doi,
+                source_kind=source_kind,
+                source_ref=item.source_url,
+                discovered_at_unix=discovered_at_unix,
+            )
+        )
+    return refs
+
+
+def _write_run_reference_artifact(
+    *,
+    runs_dir: Path,
+    run_id: str,
+    refs: list[ReferenceRecord],
+) -> Path:
+    run_dir = runs_dir / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    path = run_dir / "awesome_references.jsonl"
+    with path.open("w", encoding="utf-8") as file_handle:
+        for ref in refs:
+            file_handle.write(
+                json.dumps(
+                    {
+                        "ref_type": ref.ref_type,
+                        "normalized_value": ref.normalized_value,
+                        "source_kind": ref.source_kind,
+                        "source_ref": ref.source_ref,
+                        "discovered_at_unix": ref.discovered_at_unix,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            file_handle.write("\n")
+    return path
+
+
 def seed_awesome_sources(
     *,
     sources_path: Path,
@@ -404,8 +467,17 @@ def seed_awesome_sources(
     tier_a_seed_path: Path = DEFAULT_TIER_A_SEED_PATH,
     tier_a_arxiv_path: Path = DEFAULT_TIER_A_ARXIV_PATH,
     tier_a_dois_path: Path = DEFAULT_TIER_A_DOIS_PATH,
+    run_id: str | None = None,
+    runs_dir: Path | None = None,
+    sqlite_path: Path | None = None,
+    source_kind: str = "curated_repo",
+    candidate_retry_days: int = 14,
+    candidate_max_retries: int = 5,
 ) -> AwesomeSeedStats:
     repo_sources = load_repo_sources(sources_path)
+    discovered_at_unix = int(time.time())
+    effective_run_id = run_id or datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    run_artifact_path: Path | None = None
 
     arxiv_records: list[AwesomeSeedRecord] = []
     doi_records: list[AwesomeDoiSeedRecord] = []
@@ -484,6 +556,32 @@ def seed_awesome_sources(
         tier_a_dois_path=tier_a_dois_path,
     )
 
+    refs = _reference_records_from_seed_records(
+        arxiv_records=arxiv_records,
+        doi_records=doi_records,
+        discovered_at_unix=discovered_at_unix,
+        source_kind=source_kind,
+    )
+    if runs_dir is not None:
+        run_artifact_path = _write_run_reference_artifact(
+            runs_dir=runs_dir,
+            run_id=effective_run_id,
+            refs=refs,
+        )
+    if sqlite_path is not None:
+        sqlite_store = SQLiteStore(sqlite_path)
+        try:
+            sqlite_store.create_schema()
+            sqlite_store.upsert_reference_graph(
+                refs=refs,
+                resolved=[],
+                run_id=effective_run_id,
+                candidate_retry_days=candidate_retry_days,
+                candidate_max_retries=candidate_max_retries,
+            )
+        finally:
+            sqlite_store.close()
+
     return AwesomeSeedStats(
         repos_processed=len(repo_sources),
         total_matches=total_matches,
@@ -497,7 +595,56 @@ def seed_awesome_sources(
         doi_jsonl_path=doi_jsonl_path,
         tier_a_arxiv_path=tier_a_arxiv_written_path,
         tier_a_dois_path=tier_a_dois_path,
+        run_id=effective_run_id,
+        run_artifact_path=run_artifact_path,
     )
+
+
+def discover_awesome_references(
+    *,
+    sources_path: Path,
+    run_id: str,
+    user_agent: str,
+    runs_dir: Path,
+    sqlite_path: Path | None = None,
+    timeout_seconds: float = 20.0,
+    max_retries: int = 5,
+    backoff_start_seconds: float = 1.0,
+    backoff_cap_seconds: float = 30.0,
+    delay_seconds: float = 0.2,
+) -> list[ReferenceRecord]:
+    out_dir = runs_dir / run_id
+    stats = seed_awesome_sources(
+        sources_path=sources_path,
+        out_dir=out_dir,
+        user_agent=user_agent,
+        timeout_seconds=timeout_seconds,
+        max_retries=max_retries,
+        backoff_start_seconds=backoff_start_seconds,
+        backoff_cap_seconds=backoff_cap_seconds,
+        delay_seconds=delay_seconds,
+        tier_a_seed_path=out_dir / "tierA_seed.txt",
+        tier_a_arxiv_path=out_dir / "tierA_arxiv.txt",
+        tier_a_dois_path=out_dir / "tierA_dois.txt",
+        run_id=run_id,
+        runs_dir=runs_dir,
+        sqlite_path=sqlite_path,
+    )
+    if stats.run_artifact_path is None or not stats.run_artifact_path.exists():
+        return []
+    refs: list[ReferenceRecord] = []
+    for line in stats.run_artifact_path.read_text(encoding="utf-8").splitlines():
+        payload = json.loads(line)
+        refs.append(
+            ReferenceRecord(
+                ref_type=str(payload["ref_type"]),
+                normalized_value=str(payload["normalized_value"]),
+                source_kind=str(payload["source_kind"]),
+                source_ref=str(payload["source_ref"]),
+                discovered_at_unix=int(payload["discovered_at_unix"]),
+            )
+        )
+    return refs
 
 
 class SeedAwesomeService:
@@ -515,6 +662,12 @@ class SeedAwesomeService:
         tier_a_seed_path: Path = DEFAULT_TIER_A_SEED_PATH,
         tier_a_arxiv_path: Path = DEFAULT_TIER_A_ARXIV_PATH,
         tier_a_dois_path: Path = DEFAULT_TIER_A_DOIS_PATH,
+        run_id: str | None = None,
+        runs_dir: Path | None = None,
+        sqlite_path: Path | None = None,
+        source_kind: str = "curated_repo",
+        candidate_retry_days: int = 14,
+        candidate_max_retries: int = 5,
     ) -> AwesomeSeedStats:
         return seed_awesome_sources(
             sources_path=sources_path,
@@ -528,4 +681,10 @@ class SeedAwesomeService:
             tier_a_seed_path=tier_a_seed_path,
             tier_a_arxiv_path=tier_a_arxiv_path,
             tier_a_dois_path=tier_a_dois_path,
+            run_id=run_id,
+            runs_dir=runs_dir,
+            sqlite_path=sqlite_path,
+            source_kind=source_kind,
+            candidate_retry_days=candidate_retry_days,
+            candidate_max_retries=candidate_max_retries,
         )

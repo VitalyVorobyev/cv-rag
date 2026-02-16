@@ -77,7 +77,8 @@ uv run cv-rag answer \
   --show-sources
 ```
 
-Answer modes: `auto`, `single`, `compare`, `survey`, `implement`, `evidence`.
+Answer modes: `auto`, `explain`, `compare`, `survey`, `implement`, `evidence`, `decision`.
+Compatibility alias: `single -> explain`.
 In `auto` mode, a cheap retrieval pass routes the question to the best mode.
 
 ## Web UI
@@ -111,11 +112,11 @@ arXiv API → PDF download → GROBID (TEI XML) → section extraction → chunk
 
 ### Hybrid retrieval
 
-`HybridRetriever` merges Qdrant vector search (cosine) with SQLite FTS5 keyword search (BM25) via Reciprocal Rank Fusion (RRF). Per-document chunk quotas, section boosting, and deduplication keep results diverse and relevant.
+`HybridRetriever` merges Qdrant vector search (cosine) with SQLite FTS5 keyword search (BM25) via Reciprocal Rank Fusion (RRF). Per-document chunk quotas, section boosting, and deduplication keep results diverse and relevant. Final ranking also applies curation tier boosts plus source-provenance boosts.
 
 ### Answer generation
 
-1. Cheap prelim retrieval + answer routing (`single|compare|survey|implement|evidence`)
+1. Cheap prelim retrieval + answer routing (`explain|compare|survey|implement|evidence|decision`)
 2. Mode-specific prompt with `[S1..Sk]` source excerpts and citation rules
 3. MLX LLM generation
 4. Citation validation (with repair loop if needed)
@@ -142,39 +143,36 @@ web/               # React + TypeScript + Tailwind frontend (Vite)
 
 Beyond basic `ingest`, cv-rag supports bulk corpus building from curated sources.
 
-### Awesome-list seeding
+### Multi-source corpus workflow (additive)
 
-Extract arXiv IDs and DOIs from GitHub awesome lists:
-
-```bash
-uv run cv-rag seed-awesome \
-  --sources data/curation/awesome_sources.txt \
-  --out-dir data/curation
-
-# Then ingest
-uv run cv-rag ingest-jsonl --source data/curation/awesome_seed.jsonl
-```
-
-### DOI resolution via OpenAlex
-
-Resolve DOI seeds to Open Access PDF URLs:
+Use the `corpus` command group to run discovery, resolution, queue inspection, and ingest as one lifecycle:
 
 ```bash
-export OPENALEX_API_KEY=...   # optional but recommended
-uv run cv-rag resolve-dois \
-  --dois data/curation/tierA_dois.txt \
-  --out-dir data/curation
+# Discover references from curated repos and VisionBib
+uv run cv-rag corpus discover-awesome --sources data/curation/awesome_sources.txt
+uv run cv-rag corpus discover-visionbib --sources data/curation/visionbib_sources.txt
+
+# Resolve DOI references via OpenAlex
+uv run cv-rag corpus resolve-openalex --dois data/curation/tierA_dois.txt --out-dir data/curation
+
+# Inspect queue and ingest ready candidates
+uv run cv-rag corpus queue --limit 25
+uv run cv-rag corpus ingest --limit 10
 ```
 
-### VisionBib seeding
+Each run writes immutable artifacts under `data/curation/runs/{run_id}/`, while canonical queue/document state is updated idempotently in SQLite.
 
-Scrape bibliography pages from VisionBib:
+### Migration and rebuild
+
+For pre-deployment local stores, run destructive reset + deterministic rebuild:
 
 ```bash
-uv run cv-rag seed visionbib \
-  --sources data/curation/visionbib_sources.txt \
-  --out-dir data/curation/visionbib
+uv run cv-rag migrate reset-reindex --yes --backup-dir data/backups
+# Cache-only variant: restore from local run artifacts + cached PDFs only
+uv run cv-rag migrate reset-reindex --yes --cache-only
 ```
+
+Legacy seeding commands were removed. Use `cv-rag corpus ...` commands only.
 
 ### Corpus curation (Semantic Scholar)
 
@@ -196,6 +194,15 @@ All settings are in `cv_rag/shared/settings.py` via `CV_RAG_*` environment varia
 | `CV_RAG_DATA_DIR` | `./data` | Root data directory |
 | `CV_RAG_CHUNK_MAX_CHARS` | `1200` | Max characters per chunk |
 | `CV_RAG_CHUNK_OVERLAP` | `200` | Chunk overlap in characters |
+| `CV_RAG_DISCOVERY_RUNS_DIR` | `data/curation/runs` | Append-only run artifacts root |
+| `CV_RAG_CANDIDATE_MAX_RETRIES` | `5` | Max candidate retries before terminal failure |
+| `CV_RAG_CANDIDATE_RETRY_DAYS` | `14` | Retry delay in days for blocked candidates |
+| `CV_RAG_PROVENANCE_BOOST_CURATED` | `0.08` | Retrieval boost for curated sources |
+| `CV_RAG_PROVENANCE_BOOST_CANONICAL_API` | `0.05` | Retrieval boost for canonical API sources |
+| `CV_RAG_PROVENANCE_BOOST_SCRAPED` | `0.02` | Retrieval boost for scraped sources |
+| `CV_RAG_ANSWER_PROMPT_VERSION` | `v2` | Answer prompt policy version |
+| `CV_RAG_ROUTER_MIN_CONFIDENCE` | `0.55` | Hybrid router threshold before LLM fallback |
+| `CV_RAG_ROUTER_ENABLE_DECISION_MODE` | `true` | Enable `decision` answer mode in router |
 | `OPENALEX_API_KEY` | — | OpenAlex API key (optional) |
 
 ## Development

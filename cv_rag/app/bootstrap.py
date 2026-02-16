@@ -36,6 +36,11 @@ def build_retriever_runtime(*, settings: Settings | None = None, check_same_thre
         embedder=embed_client,
         qdrant_store=qdrant_store,
         sqlite_store=sqlite_store,
+        provenance_boosts={
+            "curated": use_settings.provenance_boost_curated,
+            "canonical_api": use_settings.provenance_boost_canonical_api,
+            "scraped": use_settings.provenance_boost_scraped,
+        },
     )
     return AppRuntime(
         settings=use_settings,

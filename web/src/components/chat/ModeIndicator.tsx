@@ -1,9 +1,11 @@
 const MODE_COLORS: Record<string, string> = {
+  explain: 'bg-blue-500/20 text-blue-400',
   single: 'bg-blue-500/20 text-blue-400',
   compare: 'bg-purple-500/20 text-purple-400',
   survey: 'bg-green-500/20 text-green-400',
   implement: 'bg-amber-500/20 text-amber-400',
   evidence: 'bg-red-500/20 text-red-400',
+  decision: 'bg-cyan-500/20 text-cyan-400',
 };
 
 interface Props {

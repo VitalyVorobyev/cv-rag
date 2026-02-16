@@ -11,6 +11,7 @@ A handoff is a markdown file that passes work from one agent to another. It is t
 3. The sending agent updates `.ai/state/backlog.md` to reflect the new status
 4. The receiving agent MUST read the handoff note before starting work
 5. Handoff notes are append-only — do not modify a sent handoff
+6. Workflow postmortems use: `YYYY-MM-DD-TASK-NNN-workflow-postmortem.md`
 
 ## Handoff Chain
 
@@ -38,3 +39,11 @@ When an agent starts a session, it reads files in this order:
 - Files changed (with brief descriptions)
 - Next step (what the receiver should do)
 - Verification commands to run
+
+## Enforcement
+
+Backlog/session consistency is CI-gated by:
+
+```bash
+uv run python .ai/scripts/validate_workflow.py
+```

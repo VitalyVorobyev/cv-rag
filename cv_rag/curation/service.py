@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -11,6 +12,12 @@ import yaml
 
 from cv_rag.curation.s2_client import DEFAULT_FIELDS, MAX_BATCH_SIZE, SemanticScholarClient
 from cv_rag.storage.sqlite import SQLiteStore
+
+ARXIV_ID_RE = re.compile(
+    r"^(?:\d{4}\.\d{4,5}|[a-z-]+(?:\.[a-z-]+)?/\d{7})(?:v\d+)?$",
+    re.IGNORECASE,
+)
+DOI_ID_RE = re.compile(r"^(?:doi:)?10\.\d{4,9}/\S+$", re.IGNORECASE)
 
 
 @dataclass(slots=True)
@@ -25,6 +32,7 @@ class CurateThresholds:
 class CurateOptions:
     refresh_days: int = 30
     limit: int | None = None
+    skip_non_arxiv: bool = True
     thresholds: CurateThresholds = field(default_factory=CurateThresholds)
 
 
@@ -34,7 +42,19 @@ class CurateResult:
     to_refresh: int
     updated: int
     skipped: int
+    skipped_non_curatable: int
     tier_distribution: dict[int, int]
+
+
+def is_curatable_paper_id(value: str) -> bool:
+    candidate = value.strip()
+    if not candidate:
+        return False
+    if DOI_ID_RE.fullmatch(candidate) is not None:
+        return True
+    if candidate.upper().startswith("ARXIV:"):
+        candidate = candidate.split(":", 1)[1].strip()
+    return ARXIV_ID_RE.fullmatch(candidate) is not None
 
 
 def load_venue_whitelist(path: Path) -> set[str]:
@@ -163,22 +183,30 @@ def curate_corpus(
     options: CurateOptions,
     progress_callback: Callable[[int, int, str, str], None] | None = None,
 ) -> CurateResult:
-    arxiv_ids = sqlite_store.list_paper_arxiv_ids(limit=options.limit)
+    all_ids = sqlite_store.list_paper_arxiv_ids(limit=options.limit)
+    skipped_non_curatable = 0
+    if options.skip_non_arxiv:
+        arxiv_ids = [item for item in all_ids if is_curatable_paper_id(item)]
+        skipped_non_curatable = len(all_ids) - len(arxiv_ids)
+    else:
+        arxiv_ids = all_ids
+
     now_ts = int(datetime.now(UTC).timestamp())
     current_year = datetime.now(UTC).year
 
     if not arxiv_ids:
         return CurateResult(
-            total_ids=0,
+            total_ids=len(all_ids),
             to_refresh=0,
             updated=0,
-            skipped=0,
+            skipped=len(all_ids),
+            skipped_non_curatable=skipped_non_curatable,
             tier_distribution=sqlite_store.get_paper_metrics_tier_distribution(),
         )
 
     timestamps = sqlite_store.get_paper_metric_timestamps(arxiv_ids)
     to_refresh = _select_stale_or_missing_ids(arxiv_ids, timestamps, options.refresh_days, now_ts)
-    skipped = len(arxiv_ids) - len(to_refresh)
+    skipped = (len(arxiv_ids) - len(to_refresh)) + skipped_non_curatable
     updated = 0
 
     total = len(to_refresh)
@@ -218,10 +246,11 @@ def curate_corpus(
         updated += len(rows)
 
     return CurateResult(
-        total_ids=len(arxiv_ids),
+        total_ids=len(all_ids),
         to_refresh=len(to_refresh),
         updated=updated,
         skipped=skipped,
+        skipped_non_curatable=skipped_non_curatable,
         tier_distribution=sqlite_store.get_paper_metrics_tier_distribution(),
     )
 

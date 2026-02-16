@@ -33,6 +33,7 @@ def search_chunks(
         chunks=[
             ChunkResponse(
                 chunk_id=c.chunk_id,
+                doc_id=c.doc_id,
                 arxiv_id=c.arxiv_id,
                 title=c.title,
                 section_title=c.section_title,

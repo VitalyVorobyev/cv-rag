@@ -45,5 +45,10 @@ For **bug fixes**: write a failing test first, then fix the code.
 ## Step 4: Merge (Human)
 
 1. Final check: `uv run pytest -q && uv run ruff check cv_rag/ tests/`
-2. Merge branch to main
-3. If architecture docs need updating, Integrator updates `CLAUDE.md` / `AGENTS.md`
+2. Workflow check: `uv run python .ai/scripts/validate_workflow.py`
+3. Merge branch to main
+4. If architecture docs need updating, Integrator updates `CLAUDE.md` / `AGENTS.md`
+
+## Hard Gate
+
+`AI Workflow Gate` CI blocks merge when backlog/spec/handoff artifacts are inconsistent.

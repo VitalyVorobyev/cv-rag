@@ -54,6 +54,7 @@ class IngestPipeline:
         metadata_json_path: Path,
         force_grobid: bool = False,
         embed_batch_size: int | None = None,
+        cache_only: bool = False,
         on_progress: Callable[[int, int, PaperMetadata], None] | None = None,
     ) -> IngestResult:
         """Run the full ingest pipeline.
@@ -89,11 +90,14 @@ class IngestPipeline:
                 if on_progress:
                     on_progress(idx, len(papers), paper)
                 try:
+                    doc_id = paper.resolved_doc_id()
+                    citation_id = paper.arxiv_id if paper.arxiv_id.strip() else doc_id
                     pdf_path = download_pdf(
                         paper=paper,
                         pdf_dir=settings.pdf_dir,
                         timeout_seconds=settings.http_timeout_seconds,
                         user_agent=settings.user_agent,
+                        cache_only=cache_only,
                     )
                     tei_path = settings.tei_dir / f"{paper.safe_file_stem()}.tei.xml"
                     tei_xml = load_tei_or_parse(
@@ -135,15 +139,18 @@ class IngestPipeline:
                             abs_url=paper.abs_url,
                             pdf_path=pdf_path,
                             tei_path=tei_path,
+                            doc_id=doc_id,
+                            provenance_kind=paper.provenance_kind,
                         )
                     )
 
                     sqlite_rows: list[dict[str, object]] = []
                     points: list[VectorPoint] = []
                     for chunk, vector in zip(chunks, vectors, strict=True):
-                        chunk_id = f"{paper.arxiv_id}:{chunk.chunk_index}"
+                        chunk_id = f"{doc_id}:{chunk.chunk_index}"
                         sqlite_rows.append({
                             "chunk_id": chunk_id,
+                            "doc_id": doc_id,
                             "arxiv_id": paper.arxiv_id,
                             "title": paper.title,
                             "section_title": chunk.section_title,
@@ -155,11 +162,12 @@ class IngestPipeline:
                             vector=vector,
                             payload={
                                 "chunk_id": chunk_id,
+                                "doc_id": doc_id,
                                 "arxiv_id": paper.arxiv_id,
                                 "title": paper.title,
                                 "section_title": chunk.section_title,
                                 "text": chunk.text,
-                                "citation": format_citation(paper.arxiv_id, chunk.section_title),
+                                "citation": format_citation(citation_id, chunk.section_title),
                             },
                         ))
 

@@ -23,6 +23,23 @@ def _parse_authors(authors_json: str | None) -> list[str]:
     return [a.strip() for a in authors_json.split(",") if a.strip()]
 
 
+def _public_arxiv_id(arxiv_id: str | None, doc_id: str | None) -> str | None:
+    value = (arxiv_id or "").strip()
+    if value and not value.startswith("doi:") and not value.startswith("url:"):
+        return value
+    if doc_id and doc_id.startswith("axv:"):
+        raw = doc_id.removeprefix("axv:")
+        return raw.split("v", 1)[0]
+    return None
+
+
+def _safe_row_value(row: object, key: str) -> object | None:
+    try:
+        return row[key]  # type: ignore[index]
+    except Exception:  # noqa: BLE001
+        return None
+
+
 @router.get("/papers", response_model=PaperListResponse)
 def list_papers(
     offset: int = 0,
@@ -35,9 +52,9 @@ def list_papers(
     where_clause = ""
     params: list[object] = []
     if search.strip():
-        where_clause = "WHERE p.arxiv_id LIKE ? OR p.title LIKE ?"
+        where_clause = "WHERE p.arxiv_id LIKE ? OR p.doc_id LIKE ? OR p.title LIKE ?"
         like_pattern = f"%{search.strip()}%"
-        params = [like_pattern, like_pattern]
+        params = [like_pattern, like_pattern, like_pattern]
 
     total_row = conn.execute(
         f"SELECT COUNT(*) FROM papers p {where_clause}",
@@ -49,6 +66,7 @@ def list_papers(
         f"""
         SELECT
             p.arxiv_id,
+            p.doc_id,
             p.title,
             p.summary,
             p.published,
@@ -76,7 +94,19 @@ def list_papers(
 
     papers = [
         PaperSummary(
-            arxiv_id=str(row["arxiv_id"]),
+            doc_id=(
+                str(_safe_row_value(row, "doc_id"))
+                if _safe_row_value(row, "doc_id") is not None
+                else None
+            ),
+            arxiv_id=_public_arxiv_id(
+                str(_safe_row_value(row, "arxiv_id"))
+                if _safe_row_value(row, "arxiv_id") is not None
+                else None,
+                str(_safe_row_value(row, "doc_id"))
+                if _safe_row_value(row, "doc_id") is not None
+                else None,
+            ),
             title=str(row["title"]),
             summary=row["summary"],
             published=row["published"],
@@ -106,6 +136,7 @@ def get_paper(
         """
         SELECT
             p.arxiv_id,
+            p.doc_id,
             p.title,
             p.summary,
             p.published,
@@ -128,7 +159,7 @@ def get_paper(
 
     chunk_rows = conn.execute(
         """
-        SELECT chunk_id, arxiv_id, title, section_title, chunk_index, text
+        SELECT chunk_id, doc_id, arxiv_id, title, section_title, chunk_index, text
         FROM chunks
         WHERE arxiv_id = ?
         ORDER BY chunk_index ASC
@@ -137,7 +168,19 @@ def get_paper(
     ).fetchall()
 
     paper = PaperSummary(
-        arxiv_id=str(row["arxiv_id"]),
+        doc_id=(
+            str(_safe_row_value(row, "doc_id"))
+            if _safe_row_value(row, "doc_id") is not None
+            else None
+        ),
+        arxiv_id=_public_arxiv_id(
+            str(_safe_row_value(row, "arxiv_id"))
+            if _safe_row_value(row, "arxiv_id") is not None
+            else None,
+            str(_safe_row_value(row, "doc_id"))
+            if _safe_row_value(row, "doc_id") is not None
+            else None,
+        ),
         title=str(row["title"]),
         summary=row["summary"],
         published=row["published"],
@@ -154,7 +197,19 @@ def get_paper(
     chunks = [
         ChunkResponse(
             chunk_id=str(cr["chunk_id"]),
-            arxiv_id=str(cr["arxiv_id"]),
+            doc_id=(
+                str(_safe_row_value(cr, "doc_id"))
+                if _safe_row_value(cr, "doc_id") is not None
+                else None
+            ),
+            arxiv_id=_public_arxiv_id(
+                str(_safe_row_value(cr, "arxiv_id"))
+                if _safe_row_value(cr, "arxiv_id") is not None
+                else None,
+                str(_safe_row_value(cr, "doc_id"))
+                if _safe_row_value(cr, "doc_id") is not None
+                else None,
+            ),
             title=str(cr["title"]),
             section_title=str(cr["section_title"] or ""),
             text=str(cr["text"]),

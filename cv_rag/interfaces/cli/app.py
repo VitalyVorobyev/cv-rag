@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 import typer
@@ -41,6 +42,13 @@ from cv_rag.ingest.dedupe import (
 )
 from cv_rag.ingest.pdf_pipeline import IngestPipeline
 from cv_rag.interfaces.cli.commands.answer import run_answer_command
+from cv_rag.interfaces.cli.commands.corpus import (
+    run_corpus_discover_awesome_command,
+    run_corpus_discover_visionbib_command,
+    run_corpus_ingest_command,
+    run_corpus_queue_command,
+    run_corpus_resolve_openalex_command,
+)
 from cv_rag.interfaces.cli.commands.curate import run_curate_command
 from cv_rag.interfaces.cli.commands.doctor import run_doctor_command
 from cv_rag.interfaces.cli.commands.eval import load_eval_cases, run_eval_command
@@ -49,12 +57,8 @@ from cv_rag.interfaces.cli.commands.ingest import (
     run_ingest_ids_command,
     run_ingest_jsonl_command,
 )
+from cv_rag.interfaces.cli.commands.migrate import run_migrate_reset_reindex_command
 from cv_rag.interfaces.cli.commands.query import run_query_command
-from cv_rag.interfaces.cli.commands.seed import (
-    run_resolve_dois_command,
-    run_seed_awesome_command,
-    run_seed_visionbib_command,
-)
 from cv_rag.interfaces.cli.commands.serve import run_serve_command
 from cv_rag.interfaces.cli.commands.stats import run_stats_command
 from cv_rag.retrieval.hybrid import (
@@ -81,7 +85,11 @@ logger = logging.getLogger(__name__)
 
 app = typer.Typer(help="Local CV papers RAG MVP")
 seed_app = typer.Typer(help="Seed curation files from external sources.")
+corpus_app = typer.Typer(help="Multi-source corpus growth workflows.")
+migrate_app = typer.Typer(help="Migration and corpus rebuild commands.")
 app.add_typer(seed_app, name="seed")
+app.add_typer(corpus_app, name="corpus")
+app.add_typer(migrate_app, name="migrate")
 console = Console()
 
 # Backward-compatible symbol used by tests/tooling.
@@ -96,6 +104,17 @@ def _main_callback(
 ) -> None:
     level = logging.DEBUG if verbose else logging.WARNING
     logging.basicConfig(level=level, format="%(name)s %(levelname)s: %(message)s")
+
+
+def _legacy_command_removed(*, command: str) -> None:
+    console.print(f"[red]Command removed: {command}[/red]")
+    console.print("[yellow]Use the corpus workflow commands instead:[/yellow]")
+    console.print("  cv-rag corpus discover-awesome --sources <path>")
+    console.print("  cv-rag corpus discover-visionbib --sources <path>")
+    console.print("  cv-rag corpus resolve-openalex --dois <path> --out-dir <path>")
+    console.print("  cv-rag corpus queue --limit <n>")
+    console.print("  cv-rag corpus ingest --limit <n>")
+    raise typer.Exit(code=1)
 
 
 def _run_ingest(
@@ -272,6 +291,11 @@ def curate(
         "--refresh-days",
         help="Refresh metrics older than this many days.",
     ),
+    skip_non_arxiv: bool = typer.Option(
+        True,
+        "--skip-non-arxiv/--no-skip-non-arxiv",
+        help="Skip IDs that are neither arXiv nor DOI (e.g. raw url:* docs) during Semantic Scholar curation.",
+    ),
     tier0_venues: Path = typer.Option(
         Path("data/venues_tier0.txt"),
         "--tier0-venues",
@@ -308,6 +332,7 @@ def curate(
         settings=settings,
         console=console,
         refresh_days=refresh_days,
+        skip_non_arxiv=skip_non_arxiv,
         tier0_venues=tier0_venues,
         tier0_min_citations=tier0_min_citations,
         tier0_min_cpy=tier0_min_cpy,
@@ -342,14 +367,8 @@ def seed_awesome(
         help="Path for unique DOI seed file.",
     ),
 ) -> None:
-    run_seed_awesome_command(
-        settings=get_settings(),
-        console=console,
-        sources=sources,
-        out_dir=out_dir,
-        tier_a_arxiv=tier_a_arxiv,
-        tier_a_dois=tier_a_dois,
-    )
+    _ = (sources, out_dir, tier_a_arxiv, tier_a_dois)
+    _legacy_command_removed(command="cv-rag seed awesome")
 
 
 @seed_app.command("visionbib")
@@ -380,15 +399,8 @@ def seed_visionbib(
         help="Path for explicit VisionBib arXiv seed file.",
     ),
 ) -> None:
-    run_seed_visionbib_command(
-        settings=get_settings(),
-        console=console,
-        sources=sources,
-        out_dir=out_dir,
-        tier_a_dois=tier_a_dois,
-        tier_a_urls=tier_a_urls,
-        tier_a_arxiv=tier_a_arxiv,
-    )
+    _ = (sources, out_dir, tier_a_dois, tier_a_urls, tier_a_arxiv)
+    _legacy_command_removed(command="cv-rag seed visionbib")
 
 
 @app.command("seed-awesome")
@@ -414,14 +426,8 @@ def seed_awesome_root(
         help="Path for unique DOI seed file.",
     ),
 ) -> None:
-    run_seed_awesome_command(
-        settings=get_settings(),
-        console=console,
-        sources=sources,
-        out_dir=out_dir,
-        tier_a_arxiv=tier_a_arxiv,
-        tier_a_dois=tier_a_dois,
-    )
+    _ = (sources, out_dir, tier_a_arxiv, tier_a_dois)
+    _legacy_command_removed(command="cv-rag seed-awesome")
 
 
 @app.command("resolve-dois")
@@ -462,16 +468,246 @@ def resolve_dois(
         help="Optional contact email appended to User-Agent as mailto.",
     ),
 ) -> None:
-    run_resolve_dois_command(
-        settings=get_settings(),
+    _ = (dois, out_dir, user_agent, api_key_env, tier_a_urls, tier_a_arxiv_from_openalex, email)
+    _legacy_command_removed(command="cv-rag resolve-dois")
+
+
+@migrate_app.command("reset-reindex")
+def migrate_reset_reindex(
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        help="Acknowledge destructive local reset/reindex behavior.",
+    ),
+    backup_dir: Path | None = typer.Option(
+        None,
+        "--backup-dir",
+        help="Optional path to store a SQLite backup before reset.",
+    ),
+    skip_curate: bool = typer.Option(
+        False,
+        "--skip-curate",
+        help="Skip final curation step after corpus rebuild.",
+    ),
+    cache_only: bool = typer.Option(
+        False,
+        "--cache-only",
+        help=(
+            "Do not fetch remote discovery/PDF data; restore references from cached run "
+            "artifacts and ingest local PDF cache only."
+        ),
+    ),
+    awesome_sources: Path = typer.Option(
+        Path("data/curation/awesome_sources.txt"),
+        "--awesome-sources",
+        help="Path to awesome source repo list.",
+    ),
+    visionbib_sources: Path = typer.Option(
+        Path("data/curation/visionbib_sources.txt"),
+        "--visionbib-sources",
+        help="Path to VisionBib source list.",
+    ),
+    dois: Path = typer.Option(
+        DEFAULT_TIER_A_DOIS_PATH,
+        "--dois",
+        help="Path to DOI list for OpenAlex resolution.",
+    ),
+    openalex_out_dir: Path = typer.Option(
+        Path("data/curation"),
+        "--openalex-out-dir",
+        help="Output directory for OpenAlex artifacts.",
+    ),
+    cache_awesome_refs: Path | None = typer.Option(
+        None,
+        "--cache-awesome-refs",
+        help="Optional path to cached awesome references JSONL.",
+    ),
+    cache_visionbib_refs: Path | None = typer.Option(
+        None,
+        "--cache-visionbib-refs",
+        help="Optional path to cached VisionBib references JSONL.",
+    ),
+    cache_openalex_resolution: Path | None = typer.Option(
+        None,
+        "--cache-openalex-resolution",
+        help="Optional path to cached OpenAlex resolution JSONL.",
+    ),
+    ingest_batch_size: int = typer.Option(
+        10,
+        "--ingest-batch-size",
+        help="Ready-candidate batch size for each ingest loop iteration.",
+    ),
+    force_grobid: bool = typer.Option(
+        False,
+        "--force-grobid",
+        help="Force GROBID re-parse during queue ingest.",
+    ),
+    embed_batch_size: int = typer.Option(
+        None,
+        "--embed-batch-size",
+        help="Embedding batch size override for queue ingest.",
+    ),
+    max_ingest_loops: int = typer.Option(
+        500,
+        "--max-ingest-loops",
+        help="Safety cap on ingest loop iterations.",
+    ),
+) -> None:
+    settings = get_settings()
+    settings.ensure_directories()
+    run_migrate_reset_reindex_command(
+        settings=settings,
+        console=console,
+        yes=yes,
+        backup_dir=backup_dir,
+        skip_curate=skip_curate,
+        cache_only=cache_only,
+        awesome_sources=awesome_sources,
+        visionbib_sources=visionbib_sources,
+        dois=dois,
+        openalex_out_dir=openalex_out_dir,
+        cache_awesome_refs=cache_awesome_refs,
+        cache_visionbib_refs=cache_visionbib_refs,
+        cache_openalex_resolution=cache_openalex_resolution,
+        ingest_batch_size=ingest_batch_size,
+        force_grobid=force_grobid,
+        embed_batch_size=embed_batch_size,
+        max_ingest_loops=max_ingest_loops,
+    )
+
+
+@corpus_app.command("discover-awesome")
+def corpus_discover_awesome(
+    sources: Path = typer.Option(
+        ...,
+        "--sources",
+        help="Path to GitHub repo list (owner/repo or full GitHub URL).",
+    ),
+    run_id: str | None = typer.Option(
+        None,
+        "--run-id",
+        help="Optional run ID. Defaults to UTC timestamp.",
+    ),
+) -> None:
+    settings = get_settings()
+    settings.ensure_directories()
+    run_corpus_discover_awesome_command(
+        settings=settings,
+        console=console,
+        sources=sources,
+        run_id=run_id,
+    )
+
+
+@corpus_app.command("discover-visionbib")
+def corpus_discover_visionbib(
+    sources: Path = typer.Option(
+        ...,
+        "--sources",
+        help="Path to VisionBib source file (prefix URL + page ranges).",
+    ),
+    run_id: str | None = typer.Option(
+        None,
+        "--run-id",
+        help="Optional run ID. Defaults to UTC timestamp.",
+    ),
+) -> None:
+    settings = get_settings()
+    settings.ensure_directories()
+    run_corpus_discover_visionbib_command(
+        settings=settings,
+        console=console,
+        sources=sources,
+        run_id=run_id,
+    )
+
+
+@corpus_app.command("resolve-openalex")
+def corpus_resolve_openalex(
+    dois: Path = typer.Option(
+        DEFAULT_TIER_A_DOIS_PATH,
+        "--dois",
+        help="Path to DOI seed file (one DOI per line).",
+    ),
+    out_dir: Path = typer.Option(
+        Path("data/curation"),
+        "--out-dir",
+        help="Output directory for OpenAlex resolution outputs.",
+    ),
+    run_id: str | None = typer.Option(
+        None,
+        "--run-id",
+        help="Optional run ID. Defaults to UTC timestamp.",
+    ),
+    api_key_env: str = typer.Option(
+        "OPENALEX_API_KEY",
+        "--api-key-env",
+        help="Environment variable name containing the OpenAlex API key.",
+    ),
+    email: str | None = typer.Option(
+        None,
+        "--email",
+        help="Optional contact email appended to User-Agent as mailto.",
+    ),
+) -> None:
+    settings = get_settings()
+    settings.ensure_directories()
+    run_corpus_resolve_openalex_command(
+        settings=settings,
         console=console,
         dois=dois,
         out_dir=out_dir,
-        user_agent=user_agent,
-        api_key_env=api_key_env,
-        tier_a_urls=tier_a_urls,
-        tier_a_arxiv_from_openalex=tier_a_arxiv_from_openalex,
+        run_id=run_id,
         email=email,
+        api_key=os.getenv(api_key_env),
+    )
+
+
+@corpus_app.command("queue")
+def corpus_queue(
+    limit: int = typer.Option(
+        25,
+        "--limit",
+        "-n",
+        help="Number of ready candidates to display.",
+    ),
+) -> None:
+    settings = get_settings()
+    settings.ensure_directories()
+    run_corpus_queue_command(settings=settings, console=console, limit=limit)
+
+
+@corpus_app.command("ingest")
+def corpus_ingest(
+    limit: int = typer.Option(
+        10,
+        "--limit",
+        "-n",
+        help="Number of ready candidates to ingest.",
+    ),
+    force_grobid: bool = typer.Option(
+        False,
+        help="Re-run GROBID parsing even when TEI already exists.",
+    ),
+    embed_batch_size: int = typer.Option(
+        None,
+        help="Embedding batch size override.",
+    ),
+    cache_only: bool = typer.Option(
+        False,
+        "--cache-only",
+        help="Do not download missing PDFs; ingest only documents already present in local cache.",
+    ),
+) -> None:
+    settings = get_settings()
+    settings.ensure_directories()
+    run_corpus_ingest_command(
+        settings=settings,
+        console=console,
+        limit=limit,
+        force_grobid=force_grobid,
+        embed_batch_size=embed_batch_size,
+        cache_only=cache_only,
     )
 
 
@@ -544,7 +780,7 @@ def answer(
     mode: str = typer.Option(
         "auto",
         "--mode",
-        help="Answer mode: auto|single|compare|survey|implement|evidence.",
+        help="Answer mode: auto|explain|compare|survey|implement|evidence|decision (single alias supported).",
     ),
     router_model: str | None = typer.Option(
         None,

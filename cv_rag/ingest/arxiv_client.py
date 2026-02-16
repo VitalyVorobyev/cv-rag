@@ -184,6 +184,7 @@ def _parse_api_feed(feed_text: str) -> list[PaperMetadata]:
                 arxiv_id=normalized,
                 arxiv_id_with_version=versioned,
                 version=version,
+                doc_id=f"axv:{versioned}",
                 title=" ".join(str(getattr(entry, "title", "")).split()),
                 summary=" ".join(str(getattr(entry, "summary", "")).split()),
                 published=getattr(entry, "published", None),
@@ -221,6 +222,7 @@ def _parse_rss_feed(feed_text: str, limit: int) -> list[PaperMetadata]:
                 arxiv_id=normalized,
                 arxiv_id_with_version=versioned,
                 version=version,
+                doc_id=f"axv:{versioned}",
                 title=" ".join(str(getattr(entry, "title", "")).split()),
                 summary=_clean_rss_summary(str(getattr(entry, "summary", ""))),
                 published=getattr(entry, "published", None),
@@ -445,6 +447,7 @@ def fetch_papers_by_ids(
                 arxiv_id=base_id,
                 arxiv_id_with_version=download_id,
                 version=requested_version or resolved_version or (source.version if source else None),
+                doc_id=f"axv:{download_id}",
                 title=title,
                 summary=summary,
                 published=published,
@@ -464,11 +467,14 @@ def download_pdf(
     timeout_seconds: float,
     user_agent: str,
     overwrite: bool = False,
+    cache_only: bool = False,
 ) -> Path:
     pdf_dir.mkdir(parents=True, exist_ok=True)
     out_path = pdf_dir / f"{paper.safe_file_stem()}.pdf"
     if out_path.exists() and not overwrite:
         return out_path
+    if cache_only and not out_path.exists():
+        raise FileNotFoundError(f"cache_only_missing_pdf:{out_path}")
 
     headers = {"User-Agent": user_agent}
     with (

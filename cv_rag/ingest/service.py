@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,7 +17,10 @@ from cv_rag.ingest.dedupe import (
     load_ingested_versions,
 )
 from cv_rag.ingest.models import PaperMetadata
+from cv_rag.ingest.pdf_pipeline import IngestPipeline
 from cv_rag.shared.settings import Settings
+from cv_rag.storage.repositories import IngestCandidate
+from cv_rag.storage.sqlite import SQLiteStore
 
 
 @dataclass(slots=True)
@@ -34,6 +38,160 @@ class ExplicitIngestSelection:
     skipped_records: int
     stats: ExplicitIngestStats
     migration: LegacyVersionMigrationStats | None
+
+
+def list_ready_candidates(*, sqlite_store: SQLiteStore, limit: int) -> list[IngestCandidate]:
+    """Return ready candidates ranked by queue priority."""
+    return sqlite_store.list_ready_candidates(limit=limit)
+
+
+def mark_candidate_result(
+    *,
+    sqlite_store: SQLiteStore,
+    settings: Settings,
+    doc_id: str,
+    status: str,
+    reason: str | None = None,
+) -> None:
+    """Persist a candidate status transition."""
+    sqlite_store.mark_candidate_result(
+        doc_id=doc_id,
+        status=status,
+        reason=reason,
+        candidate_retry_days=settings.candidate_retry_days,
+        candidate_max_retries=settings.candidate_max_retries,
+    )
+
+
+def ingest_candidates(
+    *,
+    settings: Settings,
+    candidates: list[IngestCandidate],
+    force_grobid: bool = False,
+    embed_batch_size: int | None = None,
+    cache_only: bool = False,
+    on_paper_progress: Callable[[int, int, PaperMetadata], None] | None = None,
+) -> dict[str, int]:
+    """Ingest queued candidates with available fulltext."""
+    sqlite_store = SQLiteStore(settings.sqlite_path)
+    sqlite_store.create_schema()
+    try:
+        docs = sqlite_store.get_documents_by_ids([c.doc_id for c in candidates])
+        by_doc_id = {str(doc["doc_id"]): doc for doc in docs}
+        papers: list[PaperMetadata] = []
+        blocked = 0
+
+        for candidate in candidates:
+            doc = by_doc_id.get(candidate.doc_id, {})
+            arxiv_id_with_version = str(doc.get("arxiv_id_with_version") or "").strip()
+            arxiv_id = str(doc.get("arxiv_id") or "").strip()
+            provenance_kind = str(doc.get("provenance_kind") or "").strip() or None
+            pdf_url = (candidate.best_pdf_url or str(doc.get("pdf_url") or "").strip() or None)
+
+            if not pdf_url:
+                mark_candidate_result(
+                    sqlite_store=sqlite_store,
+                    settings=settings,
+                    doc_id=candidate.doc_id,
+                    status="blocked",
+                    reason="missing_pdf_url",
+                )
+                blocked += 1
+                continue
+
+            if not arxiv_id_with_version:
+                arxiv_id_with_version = candidate.doc_id
+            if not arxiv_id:
+                arxiv_id = arxiv_id_with_version.split("v", 1)[0]
+            abs_url = (
+                f"https://arxiv.org/abs/{arxiv_id_with_version}"
+                if ":" not in arxiv_id
+                else pdf_url
+            )
+
+            paper = PaperMetadata(
+                arxiv_id=arxiv_id,
+                arxiv_id_with_version=arxiv_id_with_version,
+                version=None,
+                doc_id=candidate.doc_id,
+                provenance_kind=provenance_kind,
+                title=str(doc.get("doi") or candidate.doc_id),
+                summary="",
+                published=None,
+                updated=None,
+                authors=[],
+                pdf_url=pdf_url,
+                abs_url=abs_url,
+            )
+            if cache_only:
+                cached_pdf_path = settings.pdf_dir / f"{paper.safe_file_stem()}.pdf"
+                if not cached_pdf_path.exists():
+                    mark_candidate_result(
+                        sqlite_store=sqlite_store,
+                        settings=settings,
+                        doc_id=candidate.doc_id,
+                        status="blocked",
+                        reason="cache_only_missing_pdf",
+                    )
+                    blocked += 1
+                    continue
+            papers.append(paper)
+
+        if not papers:
+            return {
+                "selected": len(candidates),
+                "queued": 0,
+                "ingested": 0,
+                "failed": 0,
+                "blocked": blocked,
+            }
+
+        pipeline = IngestPipeline(settings)
+        metadata_path = settings.metadata_dir / f"corpus_candidates_{int(time.time())}.json"
+        result = pipeline.run(
+            papers=papers,
+            metadata_json_path=metadata_path,
+            force_grobid=force_grobid,
+            embed_batch_size=embed_batch_size,
+            cache_only=cache_only,
+            on_progress=on_paper_progress,
+        )
+        failed_prefixes: set[str] = set()
+        for failure in result.failed_papers:
+            if ": " in failure:
+                failed_prefixes.add(failure.split(": ", 1)[0].strip())
+                continue
+            if ":" in failure:
+                failed_prefixes.add(failure.rsplit(":", 1)[0].strip())
+        ingested = 0
+        failed = 0
+        for paper in papers:
+            if paper.arxiv_id in failed_prefixes:
+                failed += 1
+                mark_candidate_result(
+                    sqlite_store=sqlite_store,
+                    settings=settings,
+                    doc_id=paper.resolved_doc_id(),
+                    status="failed",
+                    reason="pipeline_failed",
+                )
+            else:
+                ingested += 1
+                mark_candidate_result(
+                    sqlite_store=sqlite_store,
+                    settings=settings,
+                    doc_id=paper.resolved_doc_id(),
+                    status="ingested",
+                )
+        return {
+            "selected": len(candidates),
+            "queued": len(papers),
+            "ingested": ingested,
+            "failed": failed,
+            "blocked": blocked,
+        }
+    finally:
+        sqlite_store.close()
 
 
 class IngestService:
@@ -206,4 +364,30 @@ class IngestService:
             skipped_records=skipped_records,
             stats=stats,
             migration=migration,
+        )
+
+    def list_ready_candidates(self, *, limit: int) -> list[IngestCandidate]:
+        sqlite_store = SQLiteStore(self.settings.sqlite_path)
+        sqlite_store.create_schema()
+        try:
+            return list_ready_candidates(sqlite_store=sqlite_store, limit=limit)
+        finally:
+            sqlite_store.close()
+
+    def ingest_candidates(
+        self,
+        *,
+        candidates: list[IngestCandidate],
+        force_grobid: bool = False,
+        embed_batch_size: int | None = None,
+        cache_only: bool = False,
+        on_paper_progress: Callable[[int, int, PaperMetadata], None] | None = None,
+    ) -> dict[str, int]:
+        return ingest_candidates(
+            settings=self.settings,
+            candidates=candidates,
+            force_grobid=force_grobid,
+            embed_batch_size=embed_batch_size,
+            cache_only=cache_only,
+            on_paper_progress=on_paper_progress,
         )

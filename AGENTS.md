@@ -23,11 +23,13 @@ uv run cv-rag ingest-ids 2104.00680 1911.11763 --no-skip-ingested
 uv run cv-rag ingest-jsonl --source data/curation/awesome_seed.jsonl --no-skip-ingested
 uv run cv-rag query "vision transformers"
 uv run cv-rag answer "vision transformers" --mode auto --model <mlx-model-path>
-uv run cv-rag seed-awesome --sources data/curation/awesome_sources.txt --out-dir data/curation
-uv run cv-rag seed awesome --sources data/curation/awesome_sources.txt --out-dir data/curation
-uv run cv-rag seed visionbib --sources data/curation/visionbib_sources.txt --out-dir data/curation/visionbib
-uv run cv-rag resolve-dois --dois data/curation/tierA_dois.txt --out-dir data/curation
-uv run cv-rag resolve-dois --dois data/curation/tierA_dois_visionbib.txt --out-dir data/curation/visionbib --tierA-arxiv-from-openalex data/curation/tierA_arxiv_openalex_visionbib.txt
+uv run cv-rag corpus discover-awesome --sources data/curation/awesome_sources.txt
+uv run cv-rag corpus discover-visionbib --sources data/curation/visionbib_sources.txt
+uv run cv-rag corpus resolve-openalex --dois data/curation/tierA_dois.txt --out-dir data/curation
+uv run cv-rag corpus queue --limit 25
+uv run cv-rag corpus ingest --limit 10
+uv run cv-rag migrate reset-reindex --yes --backup-dir data/backups
+uv run cv-rag migrate reset-reindex --yes --cache-only
 uv run cv-rag doctor
 uv run cv-rag curate --refresh-days 30
 
@@ -53,8 +55,7 @@ uv run cv-rag -v ingest --limit 5
 ```
 
 `ingest`, `ingest-ids`, and `ingest-jsonl` all default to exact-version dedupe (`--skip-ingested`) and can be overridden with `--no-skip-ingested`. For unversioned explicit IDs, cv-rag attempts version resolution first and continues best-effort with a warning if unresolved.
-`seed visionbib` reads a VisionBib prefix + page range spec and emits dedicated DOI/PDF/arXiv seed artifacts.
-`resolve-dois` can optionally export recovered arXiv IDs from OpenAlex via `--tierA-arxiv-from-openalex`.
+Legacy commands `seed-awesome`, `resolve-dois`, `seed awesome`, and `seed visionbib` were removed. Use `corpus` commands instead.
 
 ## Architecture
 
@@ -86,7 +87,7 @@ ArXiv API (`ingest/arxiv_client.py`) → GROBID (`ingest/grobid_client.py`) → 
 
 ### Relevance & Answer Safeguards
 - **Relevance guard**: Extracts rare query terms (5+ chars, digits); raises `NoRelevantSourcesError` if no term overlap and vector scores below threshold (`relevance_vector_threshold` in Settings, default 0.45).
-- **Answer routing**: `answer` uses a cheap prelim retrieval pass, then routes to `single|compare|survey|implement|evidence` via rules/LLM/hybrid (`answer/routing.py`).
+- **Answer routing**: `answer` uses a cheap prelim retrieval pass, then routes to `explain|compare|survey|implement|evidence|decision` via rules/LLM/hybrid (`answer/routing.py`). Alias `single -> explain` is accepted.
 - **Comparison guard**: Applied when routed mode is compare; refuses if fewer than 2 sources from each of the top 2 papers.
 - **Citation enforcement**: Generated answers must include `[S#]` citations; CLI/API share `answer/service.py` + `answer/citations.py`.
 

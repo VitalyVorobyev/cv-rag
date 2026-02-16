@@ -13,6 +13,7 @@ class RetrievedChunk:
     section_title: str
     text: str
     fused_score: float
+    doc_id: str | None = None
     vector_score: float | None = None
     keyword_score: float | None = None
     sources: set[str] = field(default_factory=set)
